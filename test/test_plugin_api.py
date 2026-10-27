@@ -96,6 +96,106 @@ class CollectStats(unittest.TestCase):
         self.assertEqual(load_plugin_api().collect_stats(Broken()), {"ok": False})
 
 
+class Pressure(unittest.TestCase):
+    PRESSURE = (
+        "some avg10=0.00 avg60=21.35 avg300=20.00 total=179000000\n"
+        "full avg10=0.00 avg60=20.00 avg300=19.00 total=170000000\n"
+    )
+    MEMINFO = "MemTotal: 8123456 kB\nMemFree: 1000000 kB\nMemAvailable: 3891234 kB\n"
+
+    def fake_open(self, pressure=True, meminfo=True):
+        import io
+
+        def opener(path, *args, **kwargs):
+            if path == "/proc/pressure/cpu" and pressure:
+                return io.StringIO(self.PRESSURE)
+            if path == "/proc/meminfo" and meminfo:
+                return io.StringIO(self.MEMINFO)
+            raise OSError(f"missing {path}")
+
+        return opener
+
+    def test_parse_pressure_reads_the_some_avg60(self):
+        api = load_plugin_api()
+
+        self.assertEqual(api.parse_pressure(self.PRESSURE), 21.35)
+        self.assertIsNone(api.parse_pressure("full avg10=0 avg60=1 avg300=1 total=1"))
+        self.assertIsNone(api.parse_pressure("some avg10=0 avg60=nope avg300=1 total=1"))
+        self.assertIsNone(api.parse_pressure("some avg10=0 avg60=nan avg300=1 total=1"))
+
+    def test_parse_meminfo_reads_memavailable_in_bytes(self):
+        api = load_plugin_api()
+
+        self.assertEqual(api.parse_meminfo(self.MEMINFO), 3891234 * 1024)
+        self.assertIsNone(api.parse_meminfo("MemTotal: 8123456 kB\n"))
+
+    def test_waited_verdict_thresholds(self):
+        api = load_plugin_api()
+
+        self.assertEqual(api.waited_verdict(25, None), "stuck")
+        self.assertEqual(api.waited_verdict(24, None), "busy")
+        self.assertEqual(api.waited_verdict(10, None), "busy")
+        self.assertEqual(api.waited_verdict(9, None), "ok")
+        self.assertEqual(api.waited_verdict(5, api.LOW_FREE_BYTES - 1), "stuck")
+        self.assertEqual(api.waited_verdict(5, api.LOW_FREE_BYTES), "ok")
+
+    def test_one_read_returns_waited_and_free(self):
+        api = load_plugin_api()
+
+        with mock.patch("builtins.open", side_effect=self.fake_open()) as opened:
+            result = api.read_pressure()
+
+        self.assertEqual(result["free"], 3891234 * 1024)
+        self.assertEqual(result["waited"], {"seconds": 13, "verdict": "busy"})
+        self.assertEqual(opened.call_count, 2, "one read is exactly the two /proc files")
+
+    def test_missing_proc_files_omit_everything_without_raising(self):
+        api = load_plugin_api()
+
+        with mock.patch("builtins.open", side_effect=OSError("no /proc")):
+            self.assertEqual(api.read_pressure(), {})
+
+    def test_missing_pressure_keeps_free(self):
+        api = load_plugin_api()
+
+        with mock.patch("builtins.open", side_effect=self.fake_open(pressure=False)):
+            result = api.read_pressure()
+
+        self.assertEqual(result["free"], 3891234 * 1024)
+        self.assertNotIn("waited", result)
+
+    def test_missing_meminfo_keeps_waited(self):
+        api = load_plugin_api()
+
+        with mock.patch("builtins.open", side_effect=self.fake_open(meminfo=False)):
+            result = api.read_pressure()
+
+        self.assertEqual(result["waited"], {"seconds": 13, "verdict": "busy"})
+        self.assertNotIn("free", result)
+
+
+class SnapshotPressure(unittest.TestCase):
+    def snapshot(self, pressure):
+        api = load_plugin_api()
+        api.collect_stats = lambda: {"ok": True}
+        api.read_pressure = lambda: pressure
+
+        return api.snapshot(processes=False)
+
+    def test_waited_and_free_are_added_to_the_body(self):
+        body = self.snapshot({"free": 4 * 1024**3, "waited": {"seconds": 15, "verdict": "busy"}})
+
+        self.assertEqual(body["waited"], {"seconds": 15, "verdict": "busy"})
+        self.assertEqual(body["free"], 4 * 1024**3)
+        self.assertTrue(body["ok"])
+
+    def test_missing_pressure_omits_the_fields(self):
+        body = self.snapshot({})
+
+        self.assertNotIn("waited", body)
+        self.assertNotIn("free", body)
+
+
 class FakeStatus:
     """A local HTTP server answering ``/api/status`` like Hermes does, and counting the asks."""
 
@@ -447,6 +547,7 @@ class Stream(unittest.TestCase):
     def test_the_feed_has_no_server_so_no_session_count(self):
         api = load_plugin_api()
         api.collect_stats = lambda: {"ok": True}
+        api.read_pressure = lambda: {}
 
         self.assertEqual(api.snapshot(clients=True, processes=False), {"ok": True})
 
@@ -507,6 +608,10 @@ class RealRoute(unittest.TestCase):
         self.assertGreater(body["memory"]["total"], 0)
         self.assertTrue(0 <= body["cpu_percent"] <= 100)
         self.assertEqual(body["processes"]["total"], sum(body["processes"]["by_command"].values()))
+        if "waited" in body:
+            self.assertIsInstance(body["waited"]["seconds"], int)
+            self.assertIn(body["waited"]["verdict"], {"ok", "busy", "stuck"})
+            self.assertGreaterEqual(body["free"], 0)
 
     def test_the_route_asks_the_server_it_runs_in_for_the_session_count(self):
         # The test client's server address is the fake status server's: what a real request would carry.

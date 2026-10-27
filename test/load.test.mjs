@@ -8,6 +8,7 @@ import {
   formatAge,
   formatBytes,
   formatDuration,
+  formatFree,
   formatPercent,
   levelOf,
   loadPercent,
@@ -15,11 +16,12 @@ import {
   nextPollDelay,
   POLL_MS,
   shownFigures,
-  shownPercents,
   SLOW_REQUEST_MS,
   stateNote,
   statusLines,
-  tooltipLines
+  tooltipLines,
+  waitedLabel,
+  waitedVerdict
 } from '../src/load.js'
 
 test('the chip shows CPU, 1-minute load and RAM', () => {
@@ -60,7 +62,7 @@ test('the chip counts running Hermes executables and the tooltip names each comm
   assert.equal(chipLabel({ clients: stats.clients, cpu_percent: 5, memory: { percent: 10 } }), 'CPU 5% · RAM 10% · 👥 0')
 })
 
-test('the chip shows only the switched-on figures, and only those colour it', () => {
+test('the chip shows only the switched-on figures', () => {
   const stats = {
     clients: { total: 2 },
     cpu_count: 4,
@@ -72,8 +74,6 @@ test('the chip shows only the switched-on figures, and only those colour it', ()
   const shown = shownFigures({ cpu: false, processes: false })
 
   assert.equal(chipLabel(stats, shown), 'Load 1.00 · RAM 10% · 👥 2')
-  assert.equal(levelOf(...shownPercents(stats, shown)), 'normal')
-  assert.equal(levelOf(...shownPercents(stats)), 'critical')
 })
 
 test('saved settings fill in defaults and ignore junk', () => {
@@ -105,7 +105,7 @@ test('a missing percent shows a dash, never NaN%', () => {
   assert.equal(formatPercent(undefined), '—')
 })
 
-test('the chip takes the colour of its worst figure', () => {
+test('levelOf maps a percent to a severity level', () => {
   assert.equal(levelOf(10, 50), 'normal')
   assert.equal(levelOf(80, 20), 'warning')
   assert.equal(levelOf(20, 95), 'critical')
@@ -133,6 +133,42 @@ test('durations read in milliseconds or seconds', () => {
   assert.equal(formatDuration(12_000), '12 s')
   assert.equal(formatDuration(undefined), '?')
   assert.equal(SLOW_REQUEST_MS, 1500)
+})
+
+test('free RAM reads in GiB with one decimal', () => {
+  assert.equal(formatFree(3.8 * 1024 ** 3), '3.8G free')
+  assert.equal(formatFree(4 * 1024 ** 3), '4.0G free')
+  assert.equal(formatFree(undefined), '?')
+})
+
+test('waited is the last-minute seconds, never a percent', () => {
+  assert.equal(waitedLabel({ waited: { seconds: 15 } }), 'waited 15s/60')
+  assert.equal(waitedLabel({ waited: { seconds: 0 } }), 'waited 0s/60')
+  assert.equal(waitedLabel({}), '')
+})
+
+test('waited verdict uses PSI and free RAM, not CPU or load', () => {
+  assert.equal(waitedVerdict({ waited: { seconds: 25 } }), 'stuck')
+  assert.equal(waitedVerdict({ waited: { seconds: 24 } }), 'busy')
+  assert.equal(waitedVerdict({ waited: { seconds: 10 } }), 'busy')
+  assert.equal(waitedVerdict({ waited: { seconds: 9 } }), 'ok')
+  assert.equal(waitedVerdict({ waited: { seconds: 5 }, free: 1024 ** 3 - 1 }), 'stuck')
+  assert.equal(waitedVerdict({ waited: { seconds: 5 }, free: 1024 ** 3 }), 'ok')
+  assert.equal(waitedVerdict({ free: 512 * 1024 ** 2 }), 'stuck')
+  assert.equal(waitedVerdict({ cpu_percent: 100, load_avg: [64, 64, 64] }), 'ok')
+  assert.equal(waitedVerdict({ waited: { seconds: 5, verdict: 'busy' } }), 'busy')
+})
+
+test('the chip shows free RAM and waited alongside the other figures', () => {
+  assert.equal(
+    chipLabel({
+      cpu_percent: 23.4,
+      free: 3.8 * 1024 ** 3,
+      load_avg: [1.2, 0.8, 0.5],
+      waited: { seconds: 15 }
+    }),
+    'CPU 23% · Load 1.20 · 3.8G free · waited 15s/60'
+  )
 })
 
 test('a stale chip explains its age and why the figures stopped updating', () => {
@@ -192,6 +228,21 @@ test('the tooltip names the host and every figure the server sent', () => {
   })
 
   assert.deepEqual(lines, ['gw-1', 'CPU 12% · 8 cores', 'Load 0.5 / 0.4 / 0.3', 'RAM 4.0 GB / 8.0 GB (50%)'])
+})
+
+test('the tooltip adds free RAM and the waited verdict', () => {
+  const lines = tooltipLines({
+    cpu_percent: 5,
+    free: 3.8 * 1024 ** 3,
+    memory: { percent: 50, total: 8 * 1024 ** 3, used: 4 * 1024 ** 3 },
+    waited: { seconds: 15, verdict: 'busy' }
+  })
+
+  assert.deepEqual(lines, [
+    'CPU 5%',
+    'RAM 4.0 GB / 8.0 GB (50%) · 3.8G free',
+    'Waited on CPU: 15s/60 (busy)'
+  ])
 })
 
 test('a Windows server without load average still gets a tooltip', () => {

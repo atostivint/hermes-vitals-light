@@ -2,13 +2,23 @@
 
 # Hermes Vitals Light
 
-Hermes **Desktop** and **TUI** plugin that shows the CPU, load average and RAM of the server the Desktop is
-connected to as a status-bar chip: `CPU 23% · Load 1.20 · RAM 61%`. On a remote gateway (SSH, URL +
-token) it measures the remote box, not your PC. Load is the 1-minute average (omitted when the
-server reports none); the tooltip adds hostname, cores, 5/15-min load and RAM used / total. The chip turns amber at 75 % and red at
-90 % of its worst figure (load counts per core: 4.0 on 4 cores = 100 %). When a poll fails, the
-chip keeps the last figures, dimmed, and its tooltip says how old they are and why; it shows
-`CPU —` only when it has never received a reading from the current server.
+Hermes **Desktop** and **TUI** plugin that shows the CPU, load average, free RAM and CPU pressure of
+the server the Desktop is connected to as a status-bar chip:
+`CPU 23% · Load 1.20 · 3.8G free · waited 15s/60`. On a remote gateway (SSH, URL + token) it
+measures the remote box, not your PC. Load is the 1-minute average (omitted when the server reports
+none); the tooltip adds hostname, cores, 5/15-min load, RAM used / total, free RAM and waited.
+
+`waited 15s/60` is Linux PSI CPU pressure: the seconds of the last minute at least one task was
+runnable but stalled waiting for a CPU, computed as `round(avg60 * 0.6)` from the `some` line of
+`/proc/pressure/cpu`. It is omitted when PSI is unreadable (non-Linux, containers without PSI).
+`3.8G free` is `MemAvailable` from `/proc/meminfo` in GiB, one decimal. Both come from one
+stateless two-file read, with no psutil, subprocess or cache. If RAM or PSI is unreadable, the chip
+falls back to the old percentage / omits `waited`.
+
+The chip colour comes from the waited verdict, not from CPU or load: **red (stuck)** at
+`waited >= 25` or less than 1 GiB free, **amber (busy)** at `waited >= 10`, otherwise normal. When
+a poll fails, the chip keeps the last figures, dimmed, and its tooltip says how old they are and
+why; it shows `CPU —` only when it has never received a reading from the current server.
 
 The first icon is a health light: `pulse` normally, `watch` when the last successful poll took
 1.5 s or more (the chip adds the duration, e.g. `· 2.5 s`), `clock` after a timeout (chip note
@@ -35,11 +45,12 @@ Windows launcher and its python children, the TUI's `tui_gateway`, a `hermes` an
 from its terminal. The Desktop app itself (`Hermes`, capitalised) is not counted.
 
 **Settings ▸ Plugins ▸ Hermes Vitals Light** has one switch per figure (CPU, Load average, RAM,
-Active sessions, Hermes processes), all on by default and saved per Desktop. A hidden figure no
-longer colours the chip; with everything off the chip is just its icon. The tooltip shows
-the full detail of what is measured. Active sessions and Hermes processes switched off are not
-measured at all: the chip polls `/stats?skip=clients,processes` and the server skips the
-`/api/status` ask and the process scan (the TUI does the same for its process option).
+Waited on CPU, Active sessions, Hermes processes), all on by default and saved per Desktop. A
+hidden figure is only hidden; the colour still comes from the waited verdict. With everything off
+the chip is just its icon. The tooltip shows the full detail of what is measured. Active sessions
+and Hermes processes switched off are not measured at all: the chip polls
+`/stats?skip=clients,processes` and the server skips the `/api/status` ask and the process scan
+(the TUI does the same for its process option).
 
 ## TUI
 
@@ -52,8 +63,8 @@ for as long as the card is docked.
 | Command | Effect |
 |---|---|
 | `/vitals` | dock / undock the card |
-| `/vitals ram off` | hide a figure: `cpu`, `load`, `ram`, `processes` (`on` shows it, no `on`/`off` flips it) |
-| `/vitals detail on` | add the Desktop tooltip lines (hostname, cores, 5/15-min load, RAM used / total, per-command counts) |
+| `/vitals ram off` | hide a figure: `cpu`, `load`, `ram`, `waited`, `processes` (`on` shows it, no `on`/`off` flips it) |
+| `/vitals detail on` | add the Desktop tooltip lines (hostname, cores, 5/15-min load, RAM used / total, free RAM, waited, per-command counts) |
 | `/vitals all on` · `all off` | every figure (not `detail`) |
 | `/vitals reset` | back to the defaults: every figure on, `detail` off |
 | `/vitals help` | usage and the current options |
@@ -67,7 +78,7 @@ Three halves, one package (same layout as other unified Hermes plugins):
 | Half | Where it runs | What it does |
 |---|---|---|
 | `desktop/plugin.js` | Hermes Desktop (renderer) | Chip in `statusBar.right`; polls `/stats` every 3 s by default (Refresh every), skips while the window is hidden, re-polls at once when it becomes visible or on a connection/profile switch. A failed poll keeps the last figures, dimmed. |
-| `dashboard/plugin_api.py` | The Hermes backend you connect to | Read-only `GET /api/plugins/hermes-vitals-light/stats` via `psutil` (a Hermes core dependency) and a loopback `GET /api/status` on the server it runs in. Returns only load figures, the hostname, the session total and per-command process counts. Both counts are cached and refreshed in the background, so a request never waits for them. |
+| `dashboard/plugin_api.py` | The Hermes backend you connect to | Read-only `GET /api/plugins/hermes-vitals-light/stats` via `psutil` (a Hermes core dependency), a loopback `GET /api/status` on the server it runs in, and one two-file `/proc` read for PSI/free RAM. Returns only load figures, the hostname, the session total, per-command process counts and the waited verdict. Both counts are cached and refreshed in the background, so a request never waits for them. |
 | `tui/hermes-vitals-light.mjs` | Hermes TUI (`<HERMES_HOME>/tui-widgets/`) | Ambient widget app `/vitals`; inlines `plugin_api.py` and runs it as a child (`python -c`) for the figures. |
 
 Without the backend half on the server, the chip shows `CPU —` (tooltip explains) and the
@@ -107,6 +118,7 @@ everything on, refreshed in the background; its cost is not measured yet:
 | `/stats` in `hermes serve`, everything on | the load figures only (well under 1 ms warm); at most one process scan per 5 s (~55 ms of CPU on 500 processes) and one `/api/status` ask per 15 s run in the background |
 | `/stats?skip=processes` | ~0.1 ms, plus the session count refreshed in the background every 15 s |
 | `/stats?skip=clients,processes` | ~0.1 ms |
+| PSI + free RAM read | two small `/proc` files; ~41 µs mean / ~38 µs median of CPU per call on the deployment host (p99 84 µs), no psutil, subprocess, thread or cache |
 | First process scan after start | runs in the background; ~5 s of one core on Windows (no request waits for it) |
 | TUI card child (`python -c`) | ~60 MB RSS (launcher + python); ~2 % of a core with processes on (scan cached 5 s), ~0.4 % off |
 | Desktop half | one ~260-byte request every 3 s, none while the window is hidden |
@@ -138,17 +150,24 @@ HERMES_AGENT_SRC=<hermes-agent checkout> <hermes venv python> -m unittest discov
   connection both show `offline`; a backend that is merely too slow shows `timeout`.
 - The lag warning is fixed at 1.5 s; it is not a setting. A healthy `/stats` answers well under
   100 ms, so this leaves room for a slow remote link while still flagging a struggling backend.
+- `waited` is Linux-only: it is omitted when `/proc/pressure/cpu` is unreadable (non-Linux, or a
+  container without PSI). `free` is `MemAvailable`, one decimal GiB; the chip falls back to the
+  old RAM percentage when `/proc/meminfo` is unreadable. The chip colour uses only the waited
+  verdict and free RAM: `stuck` at 25 waited seconds or under 1 GiB free, `busy` at 10 waited
+  seconds, `ok` otherwise.
+- Client polls are clamped to at least 0.5 s.
 
 - CPU % is measured between two polls (`psutil.cpu_percent(interval=None)`); several windows
-  polling the same server share that window, so each sees a shorter sample.
+  polling the same server share that window, so each sees a shorter sample. It is displayed
+  only; the chip colour no longer uses CPU % or load average.
 - Not verified in the running app yet: the chip's look in the real status bar, and the mount
   through `hermes serve` with its real `/api/status` (tested against a plain FastAPI router
   and a local stand-in for `/api/status`).
 - English-only tooltip and settings; fixed thresholds. The refresh period is a setting
   (Settings ▸ Plugins ▸ Refresh every: 1, 3, 5, 10, 30 or 60 s, default 3 s; `/vitals every 10`
   in the TUI). Hosts older than Settings ▸ Plugins show every figure.
-- CPU, load and RAM are always measured (one psutil call each, under 2 ms); switching them
-  off only hides them.
+- CPU, load and RAM are always measured (one psutil call each, under 2 ms), and waited/free are
+  one two-file `/proc` read; switching any figure off only hides it.
 - TUI: a TUI attached to a remote gateway still shows its own machine. On Windows psutil's
   first process scan takes ~13 s of one core (750 processes; later scans ~0.1 s), so `⚙ N`
   shows up that long after the card's first figures — the other figures are not delayed.

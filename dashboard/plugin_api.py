@@ -4,6 +4,13 @@ One read-only route, ``GET /stats``: CPU and memory of the machine running the H
 Desktop is connected to (``hermes serve`` runs this file in-process, so a remote gateway reports
 the remote box, not the Desktop's), plus how many sessions each client holds right now.
 
+``waited`` is Linux PSI CPU pressure: the ``some avg60`` field of ``/proc/pressure/cpu`` scaled
+to the seconds of the last minute at least one task was runnable but stalled waiting for a CPU
+(``round(avg60 * 0.6)``). ``free`` is ``MemAvailable`` from ``/proc/meminfo``. Both come from one
+stateless two-file read with no psutil, subprocess or cache; either is omitted when its file is
+unreadable. The verdict is ``stuck`` at 25 waited seconds or less than 1 GiB free, ``busy`` at
+10 waited seconds, and ``ok`` otherwise.
+
 The session count is Hermes's own ``active_sessions`` figure from its public ``GET /api/status``
 (sessions not ended and active in the last 5 minutes, among the 50 most recent, current profile).
 The route asks the server it runs in over loopback, on the socket address the request arrived
@@ -24,10 +31,11 @@ answer after a start can omit the count.
 ``?skip=clients,processes`` leaves those counts out and does not measure them: the chip asks
 for it when they are switched off in its settings (the TUI passes ``VITALS_SKIP``).
 
-Only load figures, the hostname and the session / per-command counts leave this process: no
-session ids, process list, paths or env. Fail-open by contract: without psutil the route answers
-``{"ok": false}``, an unreadable load figure is omitted and the others still answer, and an
-unreachable ``/api/status`` or unreadable process table just omits that field.
+Only load figures, the hostname, the waited/free figures and the session / per-command counts
+leave this process: no session ids, process list, paths or env. Fail-open by contract: without
+psutil the route answers ``{"ok": false}``, an unreadable load figure is omitted and the others
+still answer, and an unreachable ``/api/status``, unreadable process table or unreadable
+``/proc`` file just omits that field.
 
 The dashboard loader imports this file as a top-level module, so it stays self-contained. The TUI
 widget (``src/tui.src.mjs``) inlines it too and runs it as ``python -c``: ``stream()`` prints the
@@ -38,6 +46,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import platform
 import re
@@ -109,6 +118,75 @@ def collect_stats(ps: Any = psutil) -> dict[str, Any]:
     if "cpu_percent" not in stats and "memory" not in stats:
         return {"ok": False}
     return stats
+
+
+WAITED_STUCK_SECONDS = 25
+WAITED_BUSY_SECONDS = 10
+LOW_FREE_BYTES = 1024 * 1024**2
+
+
+def parse_pressure(text: str) -> float | None:
+    """The ``avg60`` value of the ``some`` line in ``/proc/pressure/cpu`` text."""
+    for line in text.splitlines():
+        fields = line.split()
+        if not fields or fields[0] != "some":
+            continue
+        for field in fields[1:]:
+            if field.startswith("avg60="):
+                try:
+                    value = float(field.partition("=")[2])
+                except ValueError:
+                    return None
+                return value if math.isfinite(value) else None
+    return None
+
+
+def parse_meminfo(text: str) -> int | None:
+    """``MemAvailable`` from ``/proc/meminfo`` text, in bytes (the file is in KiB)."""
+    for line in text.splitlines():
+        if line.startswith("MemAvailable:"):
+            fields = line.split()
+            if len(fields) < 2:
+                return None
+            try:
+                return int(fields[1]) * 1024
+            except ValueError:
+                return None
+    return None
+
+
+def waited_verdict(seconds: int, free: int | None) -> str:
+    """``stuck`` / ``busy`` / ``ok`` from waited seconds and MemAvailable bytes."""
+    if seconds >= WAITED_STUCK_SECONDS or (free is not None and free < LOW_FREE_BYTES):
+        return "stuck"
+    if seconds >= WAITED_BUSY_SECONDS:
+        return "busy"
+    return "ok"
+
+
+def read_pressure() -> dict[str, Any]:
+    """One stateless read of ``/proc/pressure/cpu`` and ``/proc/meminfo``; omit what is unreadable."""
+    pressure_text = meminfo_text = None
+    try:
+        with open("/proc/pressure/cpu", encoding="ascii", errors="replace") as pressure:
+            pressure_text = pressure.read()
+    except OSError:
+        pass
+    try:
+        with open("/proc/meminfo", encoding="ascii", errors="replace") as meminfo:
+            meminfo_text = meminfo.read()
+    except OSError:
+        pass
+
+    avg60 = parse_pressure(pressure_text) if pressure_text is not None else None
+    free = parse_meminfo(meminfo_text) if meminfo_text is not None else None
+    result: dict[str, Any] = {}
+    if free is not None:
+        result["free"] = free
+    if avg60 is not None:
+        seconds = round(avg60 * 0.6)
+        result["waited"] = {"seconds": seconds, "verdict": waited_verdict(seconds, free)}
+    return result
 
 
 # ``/api/status`` also checks the config version, probes the gateway and lists the profiles and
@@ -330,12 +408,18 @@ def snapshot(clients: bool = True, processes: bool = True, url: str | None = Non
 
     ``url`` is the server's ``/api/status``; without one (the TUI feed has no server) there is no session count.
     The counts come from caches refreshed in the background, so this never waits for the process table or
-    ``/api/status``: the first answer after a start can simply omit them.
+    ``/api/status``: the first answer after a start can simply omit them. ``waited`` and ``free`` come from
+    the two-file PSI/meminfo read and are likewise omitted when unreadable.
     """
     try:
         body = collect_stats()
         if not body.get("ok"):
             return body
+        pressure = read_pressure()
+        if "waited" in pressure:
+            body["waited"] = pressure["waited"]
+        if "free" in pressure:
+            body["free"] = pressure["free"]
         if clients and url:
             total = cached_active_sessions(url)
             if total is not None:

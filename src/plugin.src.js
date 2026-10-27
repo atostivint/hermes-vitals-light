@@ -24,20 +24,19 @@ import {
   CHIP_FIGURES,
   chipLabel,
   INTERVALS,
-  levelOf,
   nextPollDelay,
   refreshInterval,
   REQUEST_TIMEOUT_MS,
   shownFigures,
-  shownPercents,
   SLOW_REQUEST_MS,
   stateNote,
   statsPath,
   statusLines,
-  tooltipLines
+  tooltipLines,
+  waitedVerdict
 } from './load.js'
 
-const LEVEL_COLOR = { critical: '#ef4444', normal: undefined, warning: '#f59e0b' }
+const VERDICT_COLOR = { busy: '#f59e0b', ok: undefined, stuck: '#ef4444' }
 
 const LOADING = { status: 'loading' }
 
@@ -110,7 +109,7 @@ function chipIcon(state) {
 // `prefs`: the counts switched off are not measured on the server either (`?skip=`).
 // `interval`: the refresh period in seconds, read at every reschedule so a change applies at once.
 function createLoadStore(ctx, prefs, interval) {
-  const pollMs = () => interval.get() * 1000
+  const pollMs = () => Math.max(500, interval.get() * 1000)
   const listeners = new Set()
   let state = LOADING
   let failures = 0
@@ -281,7 +280,7 @@ function LoadChip({ prefs, store }) {
     }),
     children: jsxs('span', {
       className: CHIP_CLASS,
-      style: { color: LEVEL_COLOR[levelOf(...shownPercents(stats, shown))] },
+      style: { color: VERDICT_COLOR[waitedVerdict(stats)] },
       children: [iconNode, label ? jsx('span', { style: stale ? { opacity: 0.55 } : undefined, children: label }) : null]
     })
   })

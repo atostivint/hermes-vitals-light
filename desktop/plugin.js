@@ -21,7 +21,7 @@ import { atom, Codicon, host, STATUSBAR_AREAS, Tip, ToggleRow, useValue } from '
 import { jsx, jsxs } from 'react/jsx-runtime'
 import { useSyncExternalStore } from 'react'
 
-const LEVEL_COLOR = { critical: '#ef4444', normal: undefined, warning: '#f59e0b' }
+const VERDICT_COLOR = { busy: '#f59e0b', ok: undefined, stuck: '#ef4444' }
 
 const LOADING = { status: 'loading' }
 
@@ -94,7 +94,7 @@ function chipIcon(state) {
 // `prefs`: the counts switched off are not measured on the server either (`?skip=`).
 // `interval`: the refresh period in seconds, read at every reschedule so a change applies at once.
 function createLoadStore(ctx, prefs, interval) {
-  const pollMs = () => interval.get() * 1000
+  const pollMs = () => Math.max(500, interval.get() * 1000)
   const listeners = new Set()
   let state = LOADING
   let failures = 0
@@ -265,7 +265,7 @@ function LoadChip({ prefs, store }) {
     }),
     children: jsxs('span', {
       className: CHIP_CLASS,
-      style: { color: LEVEL_COLOR[levelOf(...shownPercents(stats, shown))] },
+      style: { color: VERDICT_COLOR[waitedVerdict(stats)] },
       children: [iconNode, label ? jsx('span', { style: stale ? { opacity: 0.55 } : undefined, children: label }) : null]
     })
   })
@@ -393,6 +393,43 @@ function formatPercent(percent) {
   return Number.isFinite(percent) ? `${Math.round(percent)}%` : '—'
 }
 
+// MemAvailable in GiB, exactly as the chip shows it: "3.8G free".
+function formatFree(bytes) {
+  if (!Number.isFinite(bytes) || bytes < 0) {
+    return '?'
+  }
+
+  return `${(bytes / 1024 ** 3).toFixed(1)}G free`
+}
+
+// Linux PSI CPU pressure: round(avg60 * 0.6) seconds of the last minute waited on CPU.
+function waitedLabel(stats) {
+  const seconds = stats.waited?.seconds
+
+  return Number.isFinite(seconds) ? `waited ${Math.round(seconds)}s/60` : ''
+}
+
+const WAITED_STUCK_SECONDS = 25
+const WAITED_BUSY_SECONDS = 10
+const LOW_FREE_BYTES = 1024 * 1024 ** 2
+
+function waitedVerdict(stats) {
+  const verdict = stats.waited?.verdict
+
+  if (verdict === 'stuck' || verdict === 'busy' || verdict === 'ok') {
+    return verdict
+  }
+
+  const seconds = stats.waited?.seconds
+  const free = stats.free
+
+  if ((Number.isFinite(seconds) && seconds >= WAITED_STUCK_SECONDS) || (Number.isFinite(free) && free < LOW_FREE_BYTES)) {
+    return 'stuck'
+  }
+
+  return Number.isFinite(seconds) && seconds >= WAITED_BUSY_SECONDS ? 'busy' : 'ok'
+}
+
 // 1-minute load per core, as a percent: a load of 4 on 4 cores is a saturated box.
 function loadPercent(stats) {
   const load1 = stats.load_avg?.[0]
@@ -405,7 +442,12 @@ function loadPercent(stats) {
 const CHIP_FIGURES = [
   { description: 'CPU use since the previous poll.', id: 'cpu', label: 'CPU' },
   { description: '1-minute load average (servers that report one).', id: 'load', label: 'Load average' },
-  { description: 'Memory in use.', id: 'ram', label: 'RAM' },
+  { description: 'Free memory (Linux MemAvailable).', id: 'ram', label: 'RAM' },
+  {
+    description: 'Seconds in the last minute at least one task waited for CPU (Linux PSI).',
+    id: 'waited',
+    label: 'Waited on CPU'
+  },
   {
     description: '👥 sessions active in the last 5 minutes on the connected server (Hermes status).',
     id: 'clients',
@@ -456,7 +498,14 @@ function chipLabel(stats, shown = ALL_SHOWN) {
   }
 
   if (shown.ram) {
-    parts.push(`RAM ${formatPercent(stats.memory?.percent)}`)
+    parts.push(Number.isFinite(stats.free) ? formatFree(stats.free) : `RAM ${formatPercent(stats.memory?.percent)}`)
+  }
+
+  if (shown.waited) {
+    const waited = waitedLabel(stats)
+    if (waited) {
+      parts.push(waited)
+    }
   }
 
   // An older backend half sends no `clients`: keep the chip as it was.
@@ -610,9 +659,18 @@ function tooltipLines(stats) {
   }
 
   const memory = stats.memory
+  const free = Number.isFinite(stats.free) ? formatFree(stats.free) : ''
 
   if (memory) {
-    lines.push(`RAM ${formatBytes(memory.used)} / ${formatBytes(memory.total)} (${formatPercent(memory.percent)})`)
+    lines.push(
+      `RAM ${formatBytes(memory.used)} / ${formatBytes(memory.total)} (${formatPercent(memory.percent)})${free ? ` · ${free}` : ''}`
+    )
+  } else if (free) {
+    lines.push(`Free RAM: ${free}`)
+  }
+
+  if (Number.isFinite(stats.waited?.seconds)) {
+    lines.push(`Waited on CPU: ${Math.round(stats.waited.seconds)}s/60 (${stats.waited.verdict ?? waitedVerdict(stats)})`)
   }
 
   const bySurface = Object.entries(stats.clients?.by_surface ?? {})

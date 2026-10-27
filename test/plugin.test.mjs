@@ -156,10 +156,12 @@ function text(node) {
 const STATS = {
   cpu_count: 4,
   cpu_percent: 23.4,
+  free: 4 * 1024 ** 3,
   hostname: 'gw-1',
   load_avg: [1.5, 1, 0.5],
   memory: { percent: 92, total: 8 * 1024 ** 3, used: 7 * 1024 ** 3 },
-  ok: true
+  ok: true,
+  waited: { seconds: 15, verdict: 'busy' }
 }
 
 test('one chip lands in the right status bar and shows nothing before the first reply', () => {
@@ -171,7 +173,7 @@ test('one chip lands in the right status bar and shows nothing before the first 
   plugin.dispose()
 })
 
-test('a reply from /stats paints CPU and RAM, coloured by the worst figure', async () => {
+test('a reply from /stats paints every figure, coloured by the waited verdict', async () => {
   const paths = []
   const plugin = load(async path => {
     paths.push(path)
@@ -183,13 +185,14 @@ test('a reply from /stats paints CPU and RAM, coloured by the worst figure', asy
 
   const chip = plugin.chip()
   assert.deepEqual(paths, ['/stats'])
-  assert.equal(text(chip.props.children), 'CPU 23% · Load 1.50 · RAM 92%')
-  assert.equal(chip.props.children.props.style.color, '#ef4444')
+  assert.equal(text(chip.props.children), 'CPU 23% · Load 1.50 · 4.0G free · waited 15s/60')
+  assert.equal(chip.props.children.props.style.color, '#f59e0b')
   assert.match(text(chip.props.label), /gw-1/)
+  assert.match(text(chip.props.label), /Waited on CPU: 15s\/60 \(busy\)/)
   plugin.dispose()
 })
 
-test('each figure has a switch in Settings, saved, and a hidden one stops colouring the chip', async () => {
+test('each figure has a switch in Settings, saved; hiding one keeps the verdict colour', async () => {
   const plugin = load(async () => STATS)
 
   await plugin.fire()
@@ -198,17 +201,24 @@ test('each figure has a switch in Settings, saved, and a hidden one stops colour
   assert.equal(plugin.pages[0].title, 'Hermes Vitals Light')
   assert.deepEqual(
     rows.map(row => row.props.label),
-    ['CPU', 'Load average', 'RAM', 'Active sessions', 'Hermes processes']
+    ['CPU', 'Load average', 'RAM', 'Waited on CPU', 'Active sessions', 'Hermes processes']
   )
   assert.ok(rows.every(row => row.props.checked))
 
   rows.find(row => row.props.label === 'RAM').props.onChange(false)
 
   const chip = plugin.chip()
-  assert.equal(text(chip.props.children), 'CPU 23% · Load 1.50')
-  assert.equal(chip.props.children.props.style.color, undefined, 'RAM at 92% no longer turns it red')
+  assert.equal(text(chip.props.children), 'CPU 23% · Load 1.50 · waited 15s/60')
+  assert.equal(chip.props.children.props.style.color, '#f59e0b', 'the RAM figure no longer decides the colour')
   assert.equal(plugin.toggles().find(row => row.props.label === 'RAM').props.checked, false)
-  assert.deepEqual(plugin.saved.chip, { clients: true, cpu: true, load: true, processes: true, ram: false })
+  assert.deepEqual(plugin.saved.chip, {
+    clients: true,
+    cpu: true,
+    load: true,
+    processes: true,
+    ram: false,
+    waited: true
+  })
   plugin.dispose()
 })
 
@@ -234,7 +244,7 @@ test('counts switched off are skipped on the server from the next poll', async (
 
 test('saved settings come back on load, and every figure off leaves the icon', async () => {
   const plugin = load(async () => STATS, {
-    chip: { clients: false, cpu: false, load: false, processes: false, ram: false }
+    chip: { clients: false, cpu: false, load: false, processes: false, ram: false, waited: false }
   })
 
   await plugin.fire()
@@ -292,7 +302,7 @@ test('a failed poll keeps the last figures, dimmed, with their age and the reaso
   await plugin.fire()
 
   const chip = plugin.chip()
-  assert.equal(text(chip.props.children), 'CPU 23% · Load 1.50 · RAM 92% · timeout')
+  assert.equal(text(chip.props.children), 'CPU 23% · Load 1.50 · 4.0G free · waited 15s/60 · timeout')
   assert.equal(chip.props.children.props.children[0].props.name, 'clock')
   assert.equal(chip.props.children.props.children[1].props.style.opacity, 0.55)
   assert.match(text(chip.props.label), /Last update: just now/)
@@ -366,7 +376,7 @@ test('a stopped backend keeps the last figures with an offline note', async () =
   await plugin.fire()
 
   const chip = plugin.chip()
-  assert.equal(text(chip.props.children), 'CPU 23% · Load 1.50 · RAM 92% · offline')
+  assert.equal(text(chip.props.children), 'CPU 23% · Load 1.50 · 4.0G free · waited 15s/60 · offline')
   assert.equal(chip.props.children.props.children[0].props.name, 'debug-disconnect')
   assert.equal(chip.props.children.props.children[1].props.style.opacity, 0.55)
   assert.match(text(chip.props.label), /unreachable \(stopped or reconnecting\)/)

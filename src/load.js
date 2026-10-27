@@ -41,6 +41,43 @@ export function formatPercent(percent) {
   return Number.isFinite(percent) ? `${Math.round(percent)}%` : '—'
 }
 
+// MemAvailable in GiB, exactly as the chip shows it: "3.8G free".
+export function formatFree(bytes) {
+  if (!Number.isFinite(bytes) || bytes < 0) {
+    return '?'
+  }
+
+  return `${(bytes / 1024 ** 3).toFixed(1)}G free`
+}
+
+// Linux PSI CPU pressure: round(avg60 * 0.6) seconds of the last minute waited on CPU.
+export function waitedLabel(stats) {
+  const seconds = stats.waited?.seconds
+
+  return Number.isFinite(seconds) ? `waited ${Math.round(seconds)}s/60` : ''
+}
+
+export const WAITED_STUCK_SECONDS = 25
+export const WAITED_BUSY_SECONDS = 10
+export const LOW_FREE_BYTES = 1024 * 1024 ** 2
+
+export function waitedVerdict(stats) {
+  const verdict = stats.waited?.verdict
+
+  if (verdict === 'stuck' || verdict === 'busy' || verdict === 'ok') {
+    return verdict
+  }
+
+  const seconds = stats.waited?.seconds
+  const free = stats.free
+
+  if ((Number.isFinite(seconds) && seconds >= WAITED_STUCK_SECONDS) || (Number.isFinite(free) && free < LOW_FREE_BYTES)) {
+    return 'stuck'
+  }
+
+  return Number.isFinite(seconds) && seconds >= WAITED_BUSY_SECONDS ? 'busy' : 'ok'
+}
+
 // 1-minute load per core, as a percent: a load of 4 on 4 cores is a saturated box.
 export function loadPercent(stats) {
   const load1 = stats.load_avg?.[0]
@@ -53,7 +90,12 @@ export function loadPercent(stats) {
 export const CHIP_FIGURES = [
   { description: 'CPU use since the previous poll.', id: 'cpu', label: 'CPU' },
   { description: '1-minute load average (servers that report one).', id: 'load', label: 'Load average' },
-  { description: 'Memory in use.', id: 'ram', label: 'RAM' },
+  { description: 'Free memory (Linux MemAvailable).', id: 'ram', label: 'RAM' },
+  {
+    description: 'Seconds in the last minute at least one task waited for CPU (Linux PSI).',
+    id: 'waited',
+    label: 'Waited on CPU'
+  },
   {
     description: '👥 sessions active in the last 5 minutes on the connected server (Hermes status).',
     id: 'clients',
@@ -104,7 +146,14 @@ export function chipLabel(stats, shown = ALL_SHOWN) {
   }
 
   if (shown.ram) {
-    parts.push(`RAM ${formatPercent(stats.memory?.percent)}`)
+    parts.push(Number.isFinite(stats.free) ? formatFree(stats.free) : `RAM ${formatPercent(stats.memory?.percent)}`)
+  }
+
+  if (shown.waited) {
+    const waited = waitedLabel(stats)
+    if (waited) {
+      parts.push(waited)
+    }
   }
 
   // An older backend half sends no `clients`: keep the chip as it was.
@@ -258,9 +307,18 @@ export function tooltipLines(stats) {
   }
 
   const memory = stats.memory
+  const free = Number.isFinite(stats.free) ? formatFree(stats.free) : ''
 
   if (memory) {
-    lines.push(`RAM ${formatBytes(memory.used)} / ${formatBytes(memory.total)} (${formatPercent(memory.percent)})`)
+    lines.push(
+      `RAM ${formatBytes(memory.used)} / ${formatBytes(memory.total)} (${formatPercent(memory.percent)})${free ? ` · ${free}` : ''}`
+    )
+  } else if (free) {
+    lines.push(`Free RAM: ${free}`)
+  }
+
+  if (Number.isFinite(stats.waited?.seconds)) {
+    lines.push(`Waited on CPU: ${Math.round(stats.waited.seconds)}s/60 (${stats.waited.verdict ?? waitedVerdict(stats)})`)
   }
 
   const bySurface = Object.entries(stats.clients?.by_surface ?? {})
