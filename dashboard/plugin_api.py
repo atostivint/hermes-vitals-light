@@ -8,23 +8,26 @@ The session count is Hermes's own ``active_sessions`` figure from its public ``G
 (sessions not ended and active in the last 5 minutes, among the 50 most recent, current profile).
 The route asks the server it runs in over loopback, on the socket address the request arrived
 on (not its ``Host`` header: behind an SSH tunnel that is the tunnel's port). ``/api/status`` does
-much more than count, so the answer is cached for 15 s, failures included. It needs the route to
-run inside the server (``plugins.isolation: in_process``, the default); in the plugin host there
-is no address to ask, and the count is left out. It is a total: no per-client breakdown.
+much more than count, so the answer is cached for 15 s, failures included, and refreshed in the
+background: the route never waits for it. It needs the route to run inside the server
+(``plugins.isolation: in_process``, the default); in the plugin host there is no address to ask,
+and the count is left out. It is a total: no per-client breakdown.
 
 The process count is every Hermes executable running on the box, any profile: ``hermes``
 (per subcommand: ``serve``, ``chat``, ``gateway``…), ``hermes-agent``, ``hermes-acp``, or a
 python running one of them. A Hermes started by another Hermes (the Windows launcher's python
 child, the TUI's ``tui_gateway``, an agent running ``hermes`` from its terminal) counts under
-its top-level ancestor. The Electron Desktop (``Hermes``, capitalised) is not counted.
+its top-level ancestor. The Electron Desktop (``Hermes``, capitalised) is not counted. The scan
+is cached for 5 s and refreshed in the background, so it never blocks a request either: the first
+answer after a start can omit the count.
 
 ``?skip=clients,processes`` leaves those counts out and does not measure them: the chip asks
 for it when they are switched off in its settings (the TUI passes ``VITALS_SKIP``).
 
 Only load figures, the hostname and the session / per-command counts leave this process: no
 session ids, process list, paths or env. Fail-open by contract: without psutil the route answers
-``{"ok": false}``, and an unreachable ``/api/status`` or unreadable process table just omits
-that field.
+``{"ok": false}``, an unreadable load figure is omitted and the others still answer, and an
+unreachable ``/api/status`` or unreadable process table just omits that field.
 
 The dashboard loader imports this file as a top-level module, so it stays self-contained. The TUI
 widget (``src/tui.src.mjs``) inlines it too and runs it as ``python -c``: ``stream()`` prints the
@@ -33,12 +36,12 @@ same body as a JSON line every 3 s.
 
 from __future__ import annotations
 
-import http.client
 import json
 import logging
 import os
 import platform
 import re
+import threading
 import time
 import urllib.request
 from collections import Counter
@@ -55,28 +58,56 @@ except ImportError:  # pragma: no cover - unit env without FastAPI
 
 try:
     import psutil
-
-    # cpu_percent(interval=None) measures since the previous call; prime it so the first poll
-    # reports a real figure instead of 0.0, and the route never blocks a worker thread.
-    psutil.cpu_percent(interval=None)
 except ImportError:  # pragma: no cover - psutil is a Hermes core dependency
     psutil = None
+else:
+    try:
+        # cpu_percent(interval=None) measures since the previous call; prime it so the first poll
+        # reports a real figure instead of 0.0, and the route never blocks a worker thread.
+        psutil.cpu_percent(interval=None)
+    except Exception:  # pragma: no cover - a broken primer must not stop the plugin loading
+        pass
 
 
 def collect_stats(ps: Any = psutil) -> dict[str, Any]:
+    """The load figures, each measured independently: one unreadable figure never hides the others."""
     if ps is None:
         return {"ok": False}
-    vm = ps.virtual_memory()
-    stats: dict[str, Any] = {
-        "ok": True,
-        "hostname": platform.node(),
-        "cpu_percent": ps.cpu_percent(interval=None),
-        "cpu_count": os.cpu_count(),
-        "memory": {"total": vm.total, "used": vm.total - vm.available, "percent": vm.percent},
-    }
+
+    stats: dict[str, Any] = {"ok": True}
+
+    try:
+        hostname = platform.node()
+    except Exception as exc:  # pragma: no cover - platform.node is effectively infallible
+        logger.debug("hermes-vitals-light: hostname unreadable: %s", exc)
+    else:
+        if hostname:
+            stats["hostname"] = hostname
+
+    cpu_count = os.cpu_count()
+    if cpu_count:
+        stats["cpu_count"] = cpu_count
+
+    try:
+        stats["cpu_percent"] = ps.cpu_percent(interval=None)
+    except Exception as exc:
+        logger.debug("hermes-vitals-light: cpu_percent unreadable: %s", exc)
+
+    try:
+        vm = ps.virtual_memory()
+        stats["memory"] = {"total": vm.total, "used": vm.total - vm.available, "percent": vm.percent}
+    except Exception as exc:
+        logger.debug("hermes-vitals-light: virtual_memory unreadable: %s", exc)
+
     getloadavg = getattr(ps, "getloadavg", None)
     if getloadavg is not None:
-        stats["load_avg"] = [round(v, 2) for v in getloadavg()]
+        try:
+            stats["load_avg"] = [round(v, 2) for v in getloadavg()]
+        except Exception as exc:
+            logger.debug("hermes-vitals-light: load average unreadable: %s", exc)
+
+    if "cpu_percent" not in stats and "memory" not in stats:
+        return {"ok": False}
     return stats
 
 
@@ -85,7 +116,15 @@ def collect_stats(ps: Any = psutil) -> dict[str, Any]:
 STATUS_TTL = 15.0
 _STATUS_TIMEOUT = 2.0
 _no_proxy = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # loopback never goes through a proxy
-_status_cache: tuple[float, str, int | None] = (0.0, "", None)  # (asked at, url, answer)
+# url -> (asked at, total or None). A failed ask is cached too, so an unreachable
+# server is not hammered on every poll.
+_status_cache: dict[str, tuple[float, int | None]] = {}
+_status_lock = threading.Lock()
+_status_refreshing: set[str] = set()
+
+
+def _start_thread(target: Any) -> None:
+    threading.Thread(target=target, name="hermes-vitals-light-refresh", daemon=True).start()
 
 
 def status_url(scope: dict[str, Any]) -> str | None:
@@ -104,20 +143,56 @@ def status_url(scope: dict[str, Any]) -> str | None:
 
 def active_sessions(url: str, clock: Any = time.monotonic) -> int | None:
     """Hermes's ``active_sessions`` from ``url``, or None when it cannot be read (cached, failures too)."""
-    global _status_cache
-    asked, cached_url, cached = _status_cache
-    if cached_url == url and clock() - asked < STATUS_TTL:
-        return cached
+    with _status_lock:
+        cached = _status_cache.get(url)
+    if cached is not None and clock() - cached[0] < STATUS_TTL:
+        return cached[1]
+
     total = None
     try:
         with _no_proxy.open(url, timeout=_STATUS_TIMEOUT) as response:
             total = json.load(response).get("active_sessions")
-    except (OSError, ValueError, http.client.HTTPException, AttributeError) as exc:  # AttributeError: not a JSON object
+    except Exception as exc:  # OSError, HTTPException, ValueError, AttributeError: not a JSON object…
         logger.debug("hermes-vitals-light: /api/status unreadable: %s", exc)
     if isinstance(total, bool) or not isinstance(total, int):
         total = None
-    _status_cache = (clock(), url, total)
+    with _status_lock:
+        _status_cache[url] = (clock(), total)
     return total
+
+
+def _refresh_status_async(url: str, clock: Any = time.monotonic, start: Any = _start_thread) -> None:
+    """Refresh ``/api/status`` in the background, once per URL; a request never waits for it."""
+    with _status_lock:
+        if url in _status_refreshing:
+            return
+        _status_refreshing.add(url)
+
+    def refresh() -> None:
+        try:
+            active_sessions(url, clock=clock)
+        finally:
+            with _status_lock:
+                _status_refreshing.discard(url)
+
+    try:
+        start(refresh)
+    except Exception as exc:  # thread creation failure must not fail the route
+        logger.debug("hermes-vitals-light: status refresh not started: %s", exc)
+        with _status_lock:
+            _status_refreshing.discard(url)
+
+
+def cached_active_sessions(url: str, clock: Any = time.monotonic, start: Any = _start_thread) -> int | None:
+    """The cached session total, refreshed in the background; None on the first ask for a URL."""
+    with _status_lock:
+        cached = _status_cache.get(url)
+
+    if cached is not None and clock() - cached[0] < STATUS_TTL:
+        return cached[1]
+
+    _refresh_status_async(url, clock=clock, start=start)
+    return cached[1] if cached is not None else None
 
 
 # Console scripts from Hermes' pyproject; None means "read the subcommand from argv".
@@ -196,7 +271,7 @@ def count_hermes_processes(procs: Iterable[dict[str, Any]]) -> dict[str, Any]:
 
 
 # The figures a client can switch off server-side: the load figures cost one psutil call, the
-# counts a ``/api/status`` call (every STATUS_TTL) and a full process scan (~50 ms of CPU per poll
+# counts a ``/api/status`` call (every STATUS_TTL) and a full process scan (~50 ms of CPU per scan
 # on 500 processes).
 SKIPPABLE = ("clients", "processes")
 
@@ -206,34 +281,82 @@ def parse_skip(value: str | None) -> frozenset[str]:
     return frozenset(name.strip() for name in (value or "").split(",")) & frozenset(SKIPPABLE)
 
 
+# The process scan is the expensive figure, and the first one can take seconds
+# on Windows. Keep the last answer; when it is stale, one background scan runs
+# and requests keep returning the previous count instead of waiting.
+PROCESS_TTL = 5.0
+_process_cache: tuple[float, dict[str, Any] | None] = (0.0, None)
+_process_lock = threading.Lock()
+
+
+def _scan_hermes_processes() -> dict[str, Any] | None:
+    if psutil is None:
+        return None
+    try:
+        rows = (p.info for p in psutil.process_iter(["pid", "ppid", "cmdline"]))
+        return count_hermes_processes(rows)
+    except Exception as exc:  # psutil.Error, OSError: the chip just loses the count
+        logger.debug("hermes-vitals-light: process table unreadable: %s", exc)
+        return None
+
+
+def cached_process_count(now: Any = time.monotonic, start: Any = _start_thread) -> dict[str, Any] | None:
+    """The last process count; a stale answer is returned while one background scan runs."""
+    global _process_cache
+    asked, value = _process_cache
+    if now() - asked < PROCESS_TTL:
+        return value
+    if not _process_lock.acquire(blocking=False):
+        return value
+
+    def refresh() -> None:
+        global _process_cache
+        try:
+            _process_cache = (now(), _scan_hermes_processes())
+        finally:
+            _process_lock.release()
+
+    try:
+        start(refresh)
+    except Exception as exc:  # thread creation failure must not fail the route
+        logger.debug("hermes-vitals-light: process scan not started: %s", exc)
+        _process_lock.release()
+        return value
+    return value
+
+
 def snapshot(clients: bool = True, processes: bool = True, url: str | None = None) -> dict[str, Any]:
     """The ``/stats`` body: load figures, then the session and process counts asked for, when readable.
 
     ``url`` is the server's ``/api/status``; without one (the TUI feed has no server) there is no session count.
+    The counts come from caches refreshed in the background, so this never waits for the process table or
+    ``/api/status``: the first answer after a start can simply omit them.
     """
-    body = collect_stats()
-    if not body["ok"]:
+    try:
+        body = collect_stats()
+        if not body.get("ok"):
+            return body
+        if clients and url:
+            total = cached_active_sessions(url)
+            if total is not None:
+                body["clients"] = {"total": total}
+        if processes and psutil is not None:
+            counts = cached_process_count()
+            if counts is not None:
+                body["processes"] = counts
         return body
-    if clients and url:
-        total = active_sessions(url)
-        if total is not None:
-            body["clients"] = {"total": total}
-    if processes:
-        try:
-            rows = (p.info for p in psutil.process_iter(["pid", "ppid", "cmdline"]))
-            body["processes"] = count_hermes_processes(rows)
-        except Exception as exc:  # psutil.Error, OSError: the chip just loses the count
-            logger.debug("hermes-vitals-light: process table unreadable: %s", exc)
-    return body
+    except Exception as exc:  # fail-open by contract, including unexpected psutil or cache errors
+        logger.debug("hermes-vitals-light: stats unavailable: %s", exc)
+        return {"ok": False}
 
 
 def stream(interval: float = 3.0, out: Any = None, skip: frozenset[str] = frozenset()) -> None:
     """One ``snapshot()`` JSON line per ``interval``: the TUI widget's feed (``python -c`` on this file).
 
-    The first line leaves out the process count: psutil's first full scan takes seconds on
-    Windows (~13 s for 750 processes), later ones a tenth of a second. ``skip`` drops counts for
-    good (the figures the card hides). Ends when the reader goes away: a closed pipe, or a parent
-    that died without closing it.
+    The first line leaves out the process count, then the scan runs in the background: on Windows
+    the first full scan takes seconds (~13 s for 750 processes), later ones a tenth of a second.
+    The load figures never wait for it. ``skip`` drops counts for good (the figures the card
+    hides). Ends when the reader goes away: a closed pipe, or a parent that died without closing it.
     """
     import json
     import sys

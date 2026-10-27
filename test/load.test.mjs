@@ -4,7 +4,10 @@ import { test } from 'node:test'
 import {
   ALL_SHOWN,
   chipLabel,
+  errorText,
+  formatAge,
   formatBytes,
+  formatDuration,
   formatPercent,
   levelOf,
   loadPercent,
@@ -13,6 +16,9 @@ import {
   POLL_MS,
   shownFigures,
   shownPercents,
+  SLOW_REQUEST_MS,
+  stateNote,
+  statusLines,
   tooltipLines
 } from '../src/load.js'
 
@@ -110,6 +116,70 @@ test('polling backs off on failure, capped, and resets on success', () => {
   assert.equal(nextPollDelay(0), POLL_MS)
   assert.ok(nextPollDelay(1) > POLL_MS)
   assert.equal(nextPollDelay(50), MAX_BACKOFF_MS)
+  assert.equal(MAX_BACKOFF_MS, 30_000)
+})
+
+test('ages read as just now, seconds, minutes or hours', () => {
+  assert.equal(formatAge(1000), 'just now')
+  assert.equal(formatAge(12_000), '12 s')
+  assert.equal(formatAge(3 * 60_000), '3 min')
+  assert.equal(formatAge(2 * 3_600_000), '2 h')
+  assert.equal(formatAge(undefined), 'just now')
+})
+
+test('durations read in milliseconds or seconds', () => {
+  assert.equal(formatDuration(420), '420 ms')
+  assert.equal(formatDuration(2500), '2.5 s')
+  assert.equal(formatDuration(12_000), '12 s')
+  assert.equal(formatDuration(undefined), '?')
+  assert.equal(SLOW_REQUEST_MS, 1500)
+})
+
+test('a stale chip explains its age and why the figures stopped updating', () => {
+  const state = { error: { kind: 'timeout' }, status: 'stale', updatedAt: 1000 }
+
+  assert.deepEqual(statusLines(state, 13_000), [
+    'Last update: 12 s ago',
+    'The Hermes backend did not answer in time. Showing the last reading.'
+  ])
+  assert.deepEqual(statusLines({ status: 'stale', updatedAt: 10_000, error: { kind: 'network' } }, 12_000), [
+    'Last update: just now',
+    'The Hermes backend is unreachable. Showing the last reading.'
+  ])
+  assert.deepEqual(statusLines({ status: 'stale', updatedAt: 1000, error: { kind: 'offline' } }, 13_000), [
+    'Last update: 12 s ago',
+    'The Hermes backend is unreachable (stopped or reconnecting). Showing the last reading.'
+  ])
+})
+
+test('a timed-out attempt names its duration', () => {
+  assert.deepEqual(statusLines({ durationMs: 8000, error: { kind: 'timeout' }, status: 'unavailable' }), [
+    'The Hermes backend did not answer in time.',
+    'Retrying automatically.',
+    'The last attempt took 8.0 s.'
+  ])
+})
+
+test('a slow but successful poll is called out in the tooltip and on the chip', () => {
+  assert.deepEqual(statusLines({ durationMs: 2500, status: 'ok' }), ['Hermes is slow: the last poll took 2.5 s.'])
+  assert.deepEqual(statusLines({ durationMs: 420, status: 'ok' }), [])
+  assert.equal(stateNote({ durationMs: 2500, status: 'ok' }), '2.5 s')
+  assert.equal(stateNote({ durationMs: 420, status: 'ok' }), '')
+  assert.equal(stateNote({ error: { kind: 'offline' }, status: 'stale' }), 'offline')
+  assert.equal(stateNote({ error: { kind: 'network' }, status: 'stale' }), 'offline')
+  assert.equal(stateNote({ error: { kind: 'timeout' }, status: 'stale' }), 'timeout')
+  assert.equal(stateNote({ error: { kind: 'missing' }, status: 'stale' }), 'plugin')
+  assert.equal(stateNote({ error: { kind: 'backend' }, status: 'stale' }), 'error')
+})
+
+test('an empty chip has no age, just the error and the retry', () => {
+  assert.deepEqual(statusLines({ status: 'loading' }), [])
+  assert.deepEqual(statusLines({ status: 'ok', stats: {} }), [])
+  assert.deepEqual(statusLines({ error: { kind: 'missing' }, status: 'unavailable' }), [
+    errorText('missing'),
+    'Retrying automatically.'
+  ])
+  assert.match(errorText('bogus'), /unreachable/)
 })
 
 test('the tooltip names the host and every figure the server sent', () => {

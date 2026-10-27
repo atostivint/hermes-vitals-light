@@ -6,16 +6,25 @@ Hermes **Desktop** and **TUI** plugin that shows the CPU, load average and RAM o
 connected to as a status-bar chip: `CPU 23% · Load 1.20 · RAM 61%`. On a remote gateway (SSH, URL +
 token) it measures the remote box, not your PC. Load is the 1-minute average (omitted when the
 server reports none); the tooltip adds hostname, cores, 5/15-min load and RAM used / total. The chip turns amber at 75 % and red at
-90 % of its worst figure (load counts per core: 4.0 on 4 cores = 100 %).
+90 % of its worst figure (load counts per core: 4.0 on 4 cores = 100 %). When a poll fails, the
+chip keeps the last figures, dimmed, and its tooltip says how old they are and why; it shows
+`CPU —` only when it has never received a reading from the current server.
+
+The first icon is a health light: `pulse` normally, `watch` when the last successful poll took
+1.5 s or more (the chip adds the duration, e.g. `· 2.5 s`), `clock` after a timeout (chip note
+`· timeout`), `debug-disconnect` when the backend is stopped or unreachable (chip note
+`· offline`), `plug` when the backend half is missing (chip note `· plugin`), and `warning` for
+another backend error (chip note `· error`). The tooltip gives the exact poll duration, the age
+of the last reading and the reason.
 
 `👥 N` is the number of active sessions on the connected server: Hermes's own
 `active_sessions` figure from its public `GET /api/status` (sessions not ended and active in
 the last 5 minutes, among the 50 most recent, current profile). It is a total, not a count
 per client; the tooltip reads `Active sessions: N`. The backend half asks the server it runs
 in, over loopback, on the socket address the request arrived on, and keeps the answer for
-15 s (`/api/status` does much more than count). That needs the route to run inside the
-server, which is the default (`plugins.isolation: in_process`): in the plugin host
-(`isolation: host`) there is no address to ask and `👥` is left out.
+15 s, refreshed in the background (`/api/status` does much more than count). That needs the
+route to run inside the server, which is the default (`plugins.isolation: in_process`): in the
+plugin host (`isolation: host`) there is no address to ask and `👥` is left out.
 
 `⚙ N` counts the Hermes executables running on the server right now, all profiles and
 users it can see: each `hermes` command (`serve`, `chat`, `gateway`, `dashboard`…),
@@ -57,12 +66,12 @@ Three halves, one package (same layout as other unified Hermes plugins):
 
 | Half | Where it runs | What it does |
 |---|---|---|
-| `desktop/plugin.js` | Hermes Desktop (renderer) | Chip in `statusBar.right`; polls `/stats` every 3 s by default (Refresh every), skips while the window is hidden, re-polls at once on a connection/profile switch. |
-| `dashboard/plugin_api.py` | The Hermes backend you connect to | Read-only `GET /api/plugins/hermes-vitals-light/stats` via `psutil` (a Hermes core dependency) and a loopback `GET /api/status` on the server it runs in. Returns only load figures, the hostname, the session total and per-command process counts. |
+| `desktop/plugin.js` | Hermes Desktop (renderer) | Chip in `statusBar.right`; polls `/stats` every 3 s by default (Refresh every), skips while the window is hidden, re-polls at once when it becomes visible or on a connection/profile switch. A failed poll keeps the last figures, dimmed. |
+| `dashboard/plugin_api.py` | The Hermes backend you connect to | Read-only `GET /api/plugins/hermes-vitals-light/stats` via `psutil` (a Hermes core dependency) and a loopback `GET /api/status` on the server it runs in. Returns only load figures, the hostname, the session total and per-command process counts. Both counts are cached and refreshed in the background, so a request never waits for them. |
 | `tui/hermes-vitals-light.mjs` | Hermes TUI (`<HERMES_HOME>/tui-widgets/`) | Ambient widget app `/vitals`; inlines `plugin_api.py` and runs it as a child (`python -c`) for the figures. |
 
 Without the backend half on the server, the chip shows `CPU —` (tooltip explains) and the
-poll backs off up to 60 s.
+poll backs off up to 30 s.
 
 ## Install
 
@@ -91,15 +100,15 @@ hermes plugins enable hermes-vitals-light                 # user plugins must be
 
 Measured on Windows 11, 528 processes, Hermes venv python (2026-10-19), before the session count
 moved to `/api/status`. That adds one ask of the server's own `/api/status` every 15 s, with
-everything on; its cost is not measured yet:
+everything on, refreshed in the background; its cost is not measured yet:
 
 | What | Cost |
 |---|---|
-| `/stats` in `hermes serve`, everything on | ~55 ms of CPU per poll (~1.8 % of a core at 3 s), almost all of it the process scan |
-| `/stats?skip=processes` | ~0.6 ms per poll |
-| `/stats?skip=clients,processes` | ~0.1 ms per poll |
-| First process scan after start | ~5 s of one core |
-| TUI card child (`python -c`) | ~60 MB RSS (launcher + python); ~2 % of a core with processes on, ~0.4 % off |
+| `/stats` in `hermes serve`, everything on | the load figures only (well under 1 ms warm); at most one process scan per 5 s (~55 ms of CPU on 500 processes) and one `/api/status` ask per 15 s run in the background |
+| `/stats?skip=processes` | ~0.1 ms, plus the session count refreshed in the background every 15 s |
+| `/stats?skip=clients,processes` | ~0.1 ms |
+| First process scan after start | runs in the background; ~5 s of one core on Windows (no request waits for it) |
+| TUI card child (`python -c`) | ~60 MB RSS (launcher + python); ~2 % of a core with processes on (scan cached 5 s), ~0.4 % off |
 | Desktop half | one ~260-byte request every 3 s, none while the window is hidden |
 
 ## Tests
@@ -117,10 +126,18 @@ HERMES_AGENT_SRC=<hermes-agent checkout> <hermes venv python> -m unittest discov
   5 minutes, among the 50 most recent of the current profile, so it stops at 50 and is not per
   client. It is left out when the route runs in the plugin host, behind a unix socket, or when
   the server's `/api/status` does not answer on its own address (a TLS certificate that does not
-  match `127.0.0.1`, for one).
+  match `127.0.0.1`, for one). It is cached for 15 s and refreshed in the background, so it can
+  be up to 15 s old; the first answer after a backend restart can omit it.
 - The process count is by command line: a Hermes run some other way (`python -c`, renamed
   script) is not seen, and processes of other users whose command line is unreadable are
-  skipped. It includes the `hermes serve` answering the chip.
+  skipped. It includes the `hermes serve` answering the chip. The scan is cached for 5 s, so the
+  count can be up to 5 s old; the first answer after a backend restart can omit it.
+- A failed poll keeps the last figures (dimmed) and their age in the tooltip; polls back off to
+  30 s. `CPU —` appears only when no reading has arrived for the current server. A timeout is
+  not treated as a missing backend half (a 404 is). A stopped backend and a dropped SSH
+  connection both show `offline`; a backend that is merely too slow shows `timeout`.
+- The lag warning is fixed at 1.5 s; it is not a setting. A healthy `/stats` answers well under
+  100 ms, so this leaves room for a slow remote link while still flagging a struggling backend.
 
 - CPU % is measured between two polls (`psutil.cpu_percent(interval=None)`); several windows
   polling the same server share that window, so each sees a shorter sample.
@@ -134,5 +151,5 @@ HERMES_AGENT_SRC=<hermes-agent checkout> <hermes venv python> -m unittest discov
   off only hides them.
 - TUI: a TUI attached to a remote gateway still shows its own machine. On Windows psutil's
   first process scan takes ~13 s of one core (750 processes; later scans ~0.1 s), so `⚙ N`
-  shows up that long after the card's first figures.
+  shows up that long after the card's first figures — the other figures are not delayed.
 - TUI: the Desktop and TUI options are separate (the Desktop's live in its local storage).

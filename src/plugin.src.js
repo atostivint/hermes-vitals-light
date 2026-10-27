@@ -27,15 +27,85 @@ import {
   levelOf,
   nextPollDelay,
   refreshInterval,
+  REQUEST_TIMEOUT_MS,
   shownFigures,
   shownPercents,
+  SLOW_REQUEST_MS,
+  stateNote,
   statsPath,
+  statusLines,
   tooltipLines
 } from './load.js'
 
 const LEVEL_COLOR = { critical: '#ef4444', normal: undefined, warning: '#f59e0b' }
 
 const LOADING = { status: 'loading' }
+
+// What went wrong, for the tooltip. A 404 is permanent until the backend is
+// changed; a timeout is usually the whole box being busy, not this plugin.
+function errorKind(error) {
+  const status = Number(error?.status ?? error?.statusCode ?? error?.response?.status)
+
+  if (status === 401 || status === 403 || status === 404) {
+    return 'missing'
+  }
+
+  if (status === 502 || status === 503 || status === 504) {
+    return 'offline'
+  }
+
+  if (status >= 500 && status < 600) {
+    return 'server'
+  }
+
+  const message = String(error?.message ?? error ?? '')
+
+  if (/\b40[134]\b/.test(message)) {
+    return 'missing'
+  }
+
+  // An SSH tunnel that died, a refused connection or a connection id the
+  // Desktop dropped: the installation is stopped or reconnecting, not slow.
+  if (
+    /no connection|econnrefused|econnreset|ehostunreach|enetunreach|enotfound|eai_again|socket hang up|network error|fetch failed|failed to fetch|connection refused|connection closed|not connected|offline|ssh operation|half-open|reconnecting/i.test(
+      message
+    )
+  ) {
+    return 'offline'
+  }
+
+  return /timeout|timed out|abort|ETIMEDOUT/i.test(message) ? 'timeout' : 'network'
+}
+
+// The first icon of the chip doubles as its health light: pulse normally, a
+// watch when Hermes is slow, a clock on timeout, a severed link when the
+// backend is stopped/unreachable, a plug when the backend half is missing.
+const WARNING_COLOR = '#f59e0b'
+const OFFLINE_COLOR = '#ef4444'
+
+function chipIcon(state) {
+  if (state.status === 'unavailable' || state.status === 'stale') {
+    if (state.error?.kind === 'missing') {
+      return { color: WARNING_COLOR, name: 'plug' }
+    }
+
+    if (state.error?.kind === 'offline' || state.error?.kind === 'network') {
+      return { color: OFFLINE_COLOR, name: 'debug-disconnect' }
+    }
+
+    if (state.error?.kind === 'timeout') {
+      return { color: WARNING_COLOR, name: 'clock' }
+    }
+
+    return { color: WARNING_COLOR, name: 'warning' }
+  }
+
+  if (Number.isFinite(state.durationMs) && state.durationMs >= SLOW_REQUEST_MS) {
+    return { color: WARNING_COLOR, name: 'watch' }
+  }
+
+  return { name: 'pulse' }
+}
 
 // `prefs`: the counts switched off are not measured on the server either (`?skip=`).
 // `interval`: the refresh period in seconds, read at every reschedule so a change applies at once.
@@ -59,17 +129,29 @@ function createLoadStore(ctx, prefs, interval) {
     cancelTimer = ctx.setTimeout(poll, ms)
   }
 
+  // A failed poll keeps the last figures: a timeout must not erase a reading
+  // that was valid a moment ago. Only a cold start shows `CPU —`.
+  const failed = (error, durationMs) => {
+    if (state.stats) {
+      set({ ...state, durationMs, error, status: 'stale' })
+    } else {
+      set({ durationMs, error, status: 'unavailable' })
+    }
+  }
+
   async function poll() {
-    if (document.hidden) {
+    if (typeof document !== 'undefined' && document.hidden) {
       schedule(pollMs())
 
       return
     }
 
     const mine = generation
+    const startedAt = Date.now()
 
     try {
-      const stats = await ctx.rest(statsPath(prefs.get()), { timeoutMs: 5000 })
+      const stats = await ctx.rest(statsPath(prefs.get()), { timeoutMs: REQUEST_TIMEOUT_MS })
+      const durationMs = Date.now() - startedAt
 
       if (mine !== generation) {
         return
@@ -77,27 +159,33 @@ function createLoadStore(ctx, prefs, interval) {
 
       if (stats?.ok) {
         failures = 0
-        set({ stats, status: 'ok' })
+        set({ durationMs, stats, status: 'ok', updatedAt: Date.now() })
       } else {
         failures++
-        set({ status: 'unavailable' })
+        failed({ kind: 'backend' }, durationMs)
       }
-    } catch {
+    } catch (error) {
       if (mine !== generation) {
         return
       }
 
       failures++
-      set({ status: 'unavailable' })
+      failed({ kind: errorKind(error), message: String(error?.message ?? error ?? '') }, Date.now() - startedAt)
     }
 
     schedule(nextPollDelay(failures, pollMs()))
   }
 
-  const restart = () => {
+  // `clear`: a new route means the old server's figures must not be shown;
+  // coming back to a visible window keeps them while the fresh poll runs.
+  const restart = (clear = true) => {
     generation++
     failures = 0
-    set(LOADING)
+
+    if (clear) {
+      set(LOADING)
+    }
+
     schedule(0)
   }
 
@@ -120,6 +208,20 @@ function createLoadStore(ctx, prefs, interval) {
       }
     })
   )
+
+  // A window that comes back into view should not wait for the old timer
+  // (which may be a long backoff after a failure).
+  const onVisibility = () => {
+    if (started && !document.hidden) {
+      restart(false)
+    }
+  }
+
+  if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+    document.addEventListener('visibilitychange', onVisibility)
+    ctx.onDispose(() => document.removeEventListener('visibilitychange', onVisibility))
+  }
+
   ctx.onDispose(() => cancelTimer())
   started = true
   restart()
@@ -135,7 +237,7 @@ function createLoadStore(ctx, prefs, interval) {
 }
 
 const CHIP_CLASS =
-  'inline-flex h-full items-center gap-1 px-1.5 text-[0.6875rem] tabular-nums text-(--ui-text-tertiary)'
+  'inline-flex h-full shrink-0 items-center gap-1 whitespace-nowrap px-1.5 text-[0.6875rem] tabular-nums text-(--ui-text-tertiary)'
 
 function LoadChip({ prefs, store }) {
   const state = useSyncExternalStore(store.subscribe, store.get)
@@ -145,29 +247,42 @@ function LoadChip({ prefs, store }) {
     return null
   }
 
+  const icon = chipIcon(state)
+  const iconNode = jsx(Codicon, {
+    name: icon.name,
+    size: '0.7rem',
+    style: icon.color ? { color: icon.color } : undefined
+  })
+
   if (state.status === 'unavailable') {
+    // The note makes a stopped backend or a timeout visible without hovering.
+    const label = ['CPU —', stateNote(state)].filter(Boolean).join(' · ')
+
     return jsx(Tip, {
-      label: 'Hermes Vitals Light unavailable: enable the hermes-vitals-light plugin on this server, then restart its backend.',
+      label: `Hermes Vitals Light unavailable: ${statusLines(state).join(' ')}`,
       children: jsxs('span', {
         className: CHIP_CLASS,
-        children: [jsx(Codicon, { name: 'pulse', size: '0.7rem' }), jsx('span', { children: 'CPU —' })]
+        children: [iconNode, jsx('span', { children: label })]
       })
     })
   }
 
   const { stats } = state
+  const stale = state.status === 'stale'
   // Every figure switched off still leaves the icon, so the tooltip stays reachable.
-  const label = chipLabel(stats, shown)
+  const base = chipLabel(stats, shown)
+  const label = [base, stateNote(state)].filter(Boolean).join(' · ')
+  const detail = [...statusLines(state), ...tooltipLines(stats)]
 
   return jsx(Tip, {
     label: jsx('div', {
       className: 'flex flex-col gap-0.5 tabular-nums',
-      children: tooltipLines(stats).map(line => jsx('div', { children: line }, line))
+      children: detail.map((line, index) => jsx('div', { children: line }, `${index}:${line}`))
     }),
     children: jsxs('span', {
       className: CHIP_CLASS,
       style: { color: LEVEL_COLOR[levelOf(...shownPercents(stats, shown))] },
-      children: [jsx(Codicon, { name: 'pulse', size: '0.7rem' }), label ? jsx('span', { children: label }) : null]
+      children: [iconNode, label ? jsx('span', { style: stale ? { opacity: 0.55 } : undefined, children: label }) : null]
     })
   })
 }

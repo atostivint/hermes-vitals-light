@@ -25,7 +25,31 @@ function atom(value) {
 const connectionId = atom('local')
 const profile = atom('default')
 
-globalThis.document = { hidden: false }
+const visibilityListeners = new Set()
+
+globalThis.document = {
+  addEventListener: (type, fn) => {
+    if (type === 'visibilitychange') {
+      visibilityListeners.add(fn)
+    }
+  },
+  hidden: false,
+  removeEventListener: (type, fn) => {
+    if (type === 'visibilitychange') {
+      visibilityListeners.delete(fn)
+    }
+  }
+}
+
+function setHidden(hidden) {
+  globalThis.document.hidden = hidden
+}
+
+function fireVisibility() {
+  for (const fn of [...visibilityListeners]) {
+    fn()
+  }
+}
 
 globalThis.__stubs = {
   atom,
@@ -247,8 +271,197 @@ test('a server without the backend half shows a dash and backs off', async () =>
 
   await plugin.fire()
 
-  assert.equal(text(plugin.chip().props.children), 'CPU —')
+  assert.equal(text(plugin.chip().props.children), 'CPU — · plugin')
   assert.ok(plugin.timers.at(-1).ms > 3000)
+  plugin.dispose()
+})
+
+test('a failed poll keeps the last figures, dimmed, with their age and the reason', async () => {
+  let calls = 0
+  const plugin = load(async () => {
+    calls++
+
+    if (calls === 1) {
+      return STATS
+    }
+
+    throw new Error('Timed out connecting to Hermes backend after 8000ms')
+  })
+
+  await plugin.fire()
+  await plugin.fire()
+
+  const chip = plugin.chip()
+  assert.equal(text(chip.props.children), 'CPU 23% · Load 1.50 · RAM 92% · timeout')
+  assert.equal(chip.props.children.props.children[0].props.name, 'clock')
+  assert.equal(chip.props.children.props.children[1].props.style.opacity, 0.55)
+  assert.match(text(chip.props.label), /Last update: just now/)
+  assert.match(text(chip.props.label), /did not answer in time/)
+  assert.match(text(chip.props.label), /Showing the last reading/)
+  plugin.dispose()
+})
+
+test('a first-poll timeout explains itself instead of claiming the plugin is missing', async () => {
+  const plugin = load(async () => {
+    throw new Error('Timed out connecting to Hermes backend after 8000ms')
+  })
+
+  await plugin.fire()
+
+  const chip = plugin.chip()
+  assert.equal(text(chip.props.children), 'CPU — · timeout')
+  assert.equal(chip.props.children.props.children[0].props.name, 'clock')
+  assert.match(chip.props.label, /did not answer in time/)
+  assert.match(chip.props.label, /Retrying automatically/)
+  assert.doesNotMatch(chip.props.label, /enable hermes-vitals-light/)
+  plugin.dispose()
+})
+
+test('a stopped backend is explicit, even on a cold start', async () => {
+  const plugin = load(async () => {
+    throw new Error('No connection with id "iris"')
+  })
+
+  await plugin.fire()
+
+  const chip = plugin.chip()
+  assert.equal(text(chip.props.children), 'CPU — · offline')
+  assert.equal(chip.props.children.props.children[0].props.name, 'debug-disconnect')
+  assert.equal(chip.props.children.props.children[0].props.style.color, '#ef4444')
+  assert.match(chip.props.label, /unreachable \(stopped or reconnecting\)/)
+  plugin.dispose()
+})
+
+test('a dead SSH tunnel and a 502 both read as offline, not as lag', async () => {
+  for (const error of [
+    new Error('SSH operation to hermes-agent@oracle timed out. The connection may be half-open; reconnecting.'),
+    Object.assign(new Error('Bad Gateway'), { status: 502 })
+  ]) {
+    const plugin = load(async () => {
+      throw error
+    })
+
+    await plugin.fire()
+
+    const chip = plugin.chip()
+    assert.equal(text(chip.props.children), 'CPU — · offline')
+    assert.equal(chip.props.children.props.children[0].props.name, 'debug-disconnect')
+    plugin.dispose()
+  }
+})
+
+test('a stopped backend keeps the last figures with an offline note', async () => {
+  let calls = 0
+  const plugin = load(async () => {
+    calls++
+
+    if (calls === 1) {
+      return STATS
+    }
+
+    throw new Error('read ECONNRESET')
+  })
+
+  await plugin.fire()
+  await plugin.fire()
+
+  const chip = plugin.chip()
+  assert.equal(text(chip.props.children), 'CPU 23% · Load 1.50 · RAM 92% · offline')
+  assert.equal(chip.props.children.props.children[0].props.name, 'debug-disconnect')
+  assert.equal(chip.props.children.props.children[1].props.style.opacity, 0.55)
+  assert.match(text(chip.props.label), /unreachable \(stopped or reconnecting\)/)
+  assert.match(text(chip.props.label), /Showing the last reading/)
+  plugin.dispose()
+})
+
+test('a slow successful poll shows a watch icon and its duration', async () => {
+  const realNow = Date.now
+  let now = 1_000_000
+  let plugin
+
+  Date.now = () => now
+
+  try {
+    plugin = load(async () => {
+      now += 2500
+
+      return STATS
+    })
+
+    await plugin.fire()
+
+    const chip = plugin.chip()
+    assert.equal(chip.props.children.props.children[0].props.name, 'watch')
+    assert.equal(chip.props.children.props.children[0].props.style.color, '#f59e0b')
+    assert.match(text(chip.props.children), /2\.5 s$/)
+    assert.match(text(chip.props.label), /Hermes is slow: the last poll took 2\.5 s/)
+  } finally {
+    plugin?.dispose()
+    Date.now = realNow
+  }
+})
+
+test('a 404 still names the missing backend half', async () => {
+  const plugin = load(async () => {
+    throw Object.assign(new Error('404'), { status: 404 })
+  })
+
+  await plugin.fire()
+
+  const chip = plugin.chip()
+  assert.equal(text(chip.props.children), 'CPU — · plugin')
+  assert.equal(chip.props.children.props.children[0].props.name, 'plug')
+  assert.match(chip.props.label, /enable hermes-vitals-light/)
+  plugin.dispose()
+})
+
+test('coming back into view polls at once and keeps the figures', async () => {
+  let calls = 0
+  const plugin = load(async () => {
+    calls++
+
+    return calls === 1 ? STATS : { ...STATS, cpu_percent: 90 }
+  })
+
+  await plugin.fire()
+  setHidden(true)
+  await plugin.fire()
+  assert.equal(calls, 1, 'no request while the window is hidden')
+
+  setHidden(false)
+  fireVisibility()
+  await plugin.fire()
+
+  const chip = plugin.chip()
+  assert.equal(calls, 2)
+  assert.match(text(chip.props.children), /CPU 90%/)
+  assert.equal(chip.props.children.props.children[1].props.style, undefined)
+  plugin.dispose()
+})
+
+test('the backoff reaches 30 s and a success restores the normal cadence', async () => {
+  let down = true
+  const plugin = load(async () => {
+    if (down) {
+      throw new Error('Timed out connecting to Hermes backend after 8000ms')
+    }
+
+    return STATS
+  })
+
+  for (let i = 0; i < 4; i++) {
+    await plugin.fire()
+  }
+
+  assert.equal(plugin.timers.filter(t => t.live).at(-1).ms, 30_000)
+
+  down = false
+  await plugin.fire()
+
+  const chip = plugin.chip()
+  assert.equal(plugin.timers.filter(t => t.live).at(-1).ms, 3000)
+  assert.equal(chip.props.children.props.children[1].props.style, undefined)
+  assert.match(text(chip.props.children), /CPU 23%/)
   plugin.dispose()
 })
 
