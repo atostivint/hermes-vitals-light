@@ -147,6 +147,9 @@ test('the feed runs plugin_api.py under the TUI python and parses split JSON lin
   assert.equal(args[0], '-c')
   assert.match(args[1], /def stream\(/)
   assert.match(args[1], /if __name__ == "__main__":/)
+  // Windows caps a process command line at 32,767 characters; leave room for the
+  // interpreter path, quoting and the other arguments.
+  assert.ok(args[1].length < 30_000, `python -c source is ${args[1].length} chars`)
 
   child.stdout.emit('data', '{"ok": true, "cpu_')
   child.stdout.emit('data', 'percent": 5}\r\nnoise\n{"ok": false}\n')
@@ -156,6 +159,39 @@ test('the feed runs plugin_api.py under the TUI python and parses split JSON lin
   assert.equal(child.killed, true)
   child.emit('exit') // our own kill is not "gone"
   assert.equal(seen.length, 2)
+
+  delete process.env.HERMES_PYTHON
+})
+
+test('the feed falls back to PYTHON, then the platform default', () => {
+  const saved = { HERMES_PYTHON: process.env.HERMES_PYTHON, PYTHON: process.env.PYTHON }
+
+  try {
+    delete process.env.HERMES_PYTHON
+    process.env.PYTHON = '/custom/python'
+
+    const custom = fakeSpawn()
+    widget.startFeed(() => {}, custom.spawn)()
+    assert.equal(custom.calls[0][0], '/custom/python')
+
+    delete process.env.PYTHON
+
+    const fallback = fakeSpawn()
+    widget.startFeed(() => {}, fallback.spawn)()
+    assert.equal(fallback.calls[0][0], process.platform === 'win32' ? 'python' : 'python3')
+  } finally {
+    if (saved.HERMES_PYTHON === undefined) {
+      delete process.env.HERMES_PYTHON
+    } else {
+      process.env.HERMES_PYTHON = saved.HERMES_PYTHON
+    }
+
+    if (saved.PYTHON === undefined) {
+      delete process.env.PYTHON
+    } else {
+      process.env.PYTHON = saved.PYTHON
+    }
+  }
 })
 
 test('the refresh period is passed to the child, 3 s by default', () => {

@@ -1,8 +1,9 @@
 /**
  * hermes-vitals-light for the Hermes TUI (`hermes --tui`) — the Desktop chip as an
  * ambient card docked above the status bar: "CPU 23% · Load 1.20 · 3.8G free
- * · waited 15s/60 · ⚙ 3", coloured by the PSI waited verdict. No session count
- * here: it comes from the server's /api/status, and the TUI measures its own machine.
+ * · waited 15s/60 · ⚙ 3", coloured by the waited verdict (PSI on Linux, free RAM
+ * elsewhere). No session count here: it comes from the server's /api/status, and
+ * the TUI measures its own machine.
  *
  * The TUI runs on the machine it measures, so there is no route to poll: the
  * card runs dashboard/plugin_api.py (inlined below) with the TUI's own Hermes
@@ -57,8 +58,12 @@ function saveOptions(options) {
  * `skip`: the counts the child does not measure (`"clients,processes"`).
  */
 export function startFeed(onStats, spawnFn = spawn, skip = '', interval = DEFAULT_INTERVAL) {
-  // The interpreter the TUI's own gateway runs on (set by the hermes launcher).
-  const python = process.env.HERMES_PYTHON?.trim() || (process.platform === 'win32' ? 'python' : 'python3')
+  // The interpreter the TUI's own gateway runs on (set by the hermes launcher), then the
+  // interpreter Hermes itself falls back to, then the platform default.
+  const python =
+    process.env.HERMES_PYTHON?.trim() ||
+    process.env.PYTHON?.trim() ||
+    (process.platform === 'win32' ? 'python' : 'python3')
   const env = { ...process.env, PYTHONUNBUFFERED: '1', VITALS_INTERVAL: String(interval), VITALS_SKIP: skip }
 
   const child = spawnFn(python, ['-c', STATS_PY], { env, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true })

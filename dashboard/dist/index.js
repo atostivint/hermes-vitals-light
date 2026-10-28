@@ -35,7 +35,7 @@
       h('div', { style: { display: 'grid', gap: '0.375rem' } }, [
         h('h1', { style: { color: 'var(--ui-text)', fontSize: '1.125rem', fontWeight: 600, margin: 0 } }, 'Hermes Vitals Light'),
         paragraph(
-          'CPU, load average, free RAM and CPU pressure of the connected server are shown as a chip in the Hermes Desktop status bar.'
+          'CPU, load average, free RAM and CPU pressure (Linux PSI) of the connected server are shown as a chip in the Hermes Desktop status bar.'
         )
       ]),
       h(

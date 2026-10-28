@@ -6,10 +6,12 @@ the remote box, not the Desktop's), plus how many sessions are active right now.
 
 ``waited`` is Linux PSI CPU pressure: the ``some avg60`` field of ``/proc/pressure/cpu`` scaled
 to the seconds of the last minute at least one task was runnable but stalled waiting for a CPU
-(``round(avg60 * 0.6)``). ``free`` is ``MemAvailable`` from ``/proc/meminfo``. Both come from one
-stateless two-file read with no psutil, subprocess or cache; either is omitted when its file is
-unreadable. The verdict is ``stuck`` at 25 waited seconds or less than 1 GiB free, ``busy`` at
-10 waited seconds, and ``ok`` otherwise.
+(``round(avg60 * 0.6)``). ``free`` is ``MemAvailable`` from ``/proc/meminfo`` on Linux and
+psutil's available RAM on macOS and Windows, so the chip still has a free-memory figure there.
+The Linux figures come from one stateless two-file read with no psutil, subprocess or cache; an
+unreadable file omits just its figure. ``waited`` is omitted where the kernel has no PSI (macOS,
+Windows, containers without it). The verdict is ``stuck`` at 25 waited seconds or less than 1 GiB
+free, ``busy`` at 10 waited seconds, and ``ok`` otherwise.
 
 The session count is Hermes's own ``active_sessions`` figure from its public ``GET /api/status``
 (sessions not ended and active in the last 5 minutes, among the 50 most recent, current profile).
@@ -50,6 +52,7 @@ import math
 import os
 import platform
 import re
+import sys
 import threading
 import time
 import urllib.request
@@ -79,7 +82,11 @@ else:
 
 
 def collect_stats(ps: Any = psutil) -> dict[str, Any]:
-    """The load figures, each measured independently: one unreadable figure never hides the others."""
+    """The load figures, each measured independently: one unreadable figure never hides the others.
+
+    ``free`` is psutil's available RAM so macOS and Windows servers get the same figure as Linux
+    (where ``read_pressure`` replaces it with ``MemAvailable``).
+    """
     if ps is None:
         return {"ok": False}
 
@@ -105,6 +112,14 @@ def collect_stats(ps: Any = psutil) -> dict[str, Any]:
     try:
         vm = ps.virtual_memory()
         stats["memory"] = {"total": vm.total, "used": vm.total - vm.available, "percent": vm.percent}
+        available = getattr(vm, "available", None)
+        if (
+            isinstance(available, (int, float))
+            and not isinstance(available, bool)
+            and math.isfinite(available)
+            and available >= 0
+        ):
+            stats["free"] = int(available)
     except Exception as exc:
         logger.debug("hermes-vitals-light: virtual_memory unreadable: %s", exc)
 
@@ -164,8 +179,15 @@ def waited_verdict(seconds: int, free: int | None) -> str:
     return "ok"
 
 
-def read_pressure() -> dict[str, Any]:
-    """One stateless read of ``/proc/pressure/cpu`` and ``/proc/meminfo``; omit what is unreadable."""
+def read_pressure(system: str = sys.platform) -> dict[str, Any]:
+    """One stateless read of Linux's ``/proc/pressure/cpu`` and ``/proc/meminfo``.
+
+    On macOS and Windows the result is empty without touching the filesystem: the caller keeps
+    psutil's ``free`` and omits ``waited``.
+    """
+    if not system.startswith("linux"):
+        return {}
+
     pressure_text = meminfo_text = None
     try:
         with open("/proc/pressure/cpu", encoding="ascii", errors="replace") as pressure:
@@ -408,8 +430,9 @@ def snapshot(clients: bool = True, processes: bool = True, url: str | None = Non
 
     ``url`` is the server's ``/api/status``; without one (the TUI feed has no server) there is no session count.
     The counts come from caches refreshed in the background, so this never waits for the process table or
-    ``/api/status``: the first answer after a start can simply omit them. ``waited`` and ``free`` come from
-    the two-file PSI/meminfo read and are likewise omitted when unreadable.
+    ``/api/status``: the first answer after a start can simply omit them. ``waited`` comes from the PSI
+    read and is omitted where the kernel has no PSI; ``free`` falls back to psutil's available RAM on
+    those platforms and is likewise omitted when every source is unreadable.
     """
     try:
         body = collect_stats()
@@ -420,6 +443,11 @@ def snapshot(clients: bool = True, processes: bool = True, url: str | None = Non
             body["waited"] = pressure["waited"]
         if "free" in pressure:
             body["free"] = pressure["free"]
+        waited = body.get("waited")
+        if isinstance(waited, dict) and isinstance(waited.get("seconds"), int):
+            # The verdict follows the free figure actually returned, including psutil's fallback
+            # when /proc/meminfo was unreadable.
+            waited["verdict"] = waited_verdict(waited["seconds"], body.get("free"))
         if clients and url:
             total = cached_active_sessions(url)
             if total is not None:
