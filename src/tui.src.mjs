@@ -1,8 +1,8 @@
 /**
  * hermes-vitals-light for the Hermes TUI (`hermes --tui`) — the Desktop chip as an
- * ambient card docked above the status bar: "CPU 23% · Load 1.20 · RAM 61%
- * · ⚙ 3", coloured by its worst figure. No session count here: it comes from
- * the server's /api/status, and the TUI measures its own machine.
+ * ambient card docked above the status bar: "CPU 23% · Load 1.20 · 3.8G free
+ * · waited 15s/60 · ⚙ 3", coloured by the PSI waited verdict. No session count
+ * here: it comes from the server's /api/status, and the TUI measures its own machine.
  *
  * The TUI runs on the machine it measures, so there is no route to poll: the
  * card runs dashboard/plugin_api.py (inlined below) with the TUI's own Hermes
@@ -10,7 +10,7 @@
  * the card is docked.
  *
  *   /vitals                 dock / undock the card
- *   /vitals ram off         hide a figure (cpu, load, ram, processes)
+ *   /vitals ram off         hide a figure (cpu, load, ram, waited, processes)
  *   /vitals detail on       add the tooltip lines under the chip line
  *   /vitals every 10        refresh every 10 s (1, 3, 5, 10, 30 or 60; default 3)
  *   /vitals all on | reset  every figure / back to the defaults

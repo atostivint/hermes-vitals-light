@@ -2,9 +2,11 @@
 
 # Hermes Vitals Light
 
+[![CI](https://github.com/atostivint/hermes-vitals-light/actions/workflows/ci.yml/badge.svg)](https://github.com/atostivint/hermes-vitals-light/actions/workflows/ci.yml)
+
 Hermes **Desktop** and **TUI** plugin that shows the CPU, load average, free RAM and CPU pressure of
 the server the Desktop is connected to as a status-bar chip:
-`CPU 23% · Load 1.20 · 3.8G free · waited 15s/60`. On a remote gateway (SSH, URL + token) it
+`CPU 23% · Load 1.20 · 3.8G free · waited 15s/60 · 👥 2 · ⚙ 3`. On a remote gateway (SSH, URL + token) it
 measures the remote box, not your PC. Load is the 1-minute average (omitted when the server reports
 none); the tooltip adds hostname, cores, 5/15-min load, RAM used / total, free RAM and waited.
 
@@ -84,6 +86,17 @@ Three halves, one package (same layout as other unified Hermes plugins):
 Without the backend half on the server, the chip shows `CPU —` (tooltip explains) and the
 poll backs off up to 30 s.
 
+`/stats` is read-only and goes through the backend's usual authentication. It exposes the
+hostname, the load figures and the two counts; no session ids, process list, paths or environment.
+
+## Requirements
+
+- Hermes Desktop with plugin support (Desktop half) or `hermes --tui` (TUI half).
+- The backend half needs `psutil` and FastAPI, both already present in a `hermes serve`
+  environment; no extra dependency is installed.
+- `waited` and `free` read Linux `/proc`; elsewhere the chip falls back to RAM % and omits `waited`.
+- Node.js 20+ is needed only to build from source.
+
 ## Install
 
 Desktop and TUI halves (this machine; the Desktop one ships off, enable it in
@@ -107,11 +120,19 @@ hermes plugins enable hermes-vitals-light                 # user plugins must be
 # then restart that backend (hermes serve / dashboard)
 ```
 
+## Uninstall
+
+- **Desktop**: disable it in **Capabilities → Plugins**, then delete
+  `<hermes home>/desktop-plugins/hermes-vitals-light/`.
+- **TUI**: delete `<HERMES_HOME>/tui-widgets/hermes-vitals-light.mjs`; remove
+  `<HERMES_HOME>/vitals.json` too to drop its saved options.
+- **Backend**: `hermes plugins disable hermes-vitals-light`, then restart that backend.
+
 ## Footprint
 
-Measured on Windows 11, 528 processes, Hermes venv python (2026-10-19), before the session count
-moved to `/api/status`. That adds one ask of the server's own `/api/status` every 15 s, with
-everything on, refreshed in the background; its cost is not measured yet:
+Measured on Windows 11, 528 processes, Hermes venv python (2026-10-19). The session count was
+added after these figures and was not measured separately: it adds one ask of the server's own
+`/api/status` every 15 s, with everything on, refreshed in the background.
 
 | What | Cost |
 |---|---|
@@ -128,9 +149,12 @@ everything on, refreshed in the background; its cost is not measured yet:
 ```
 node --test test/load.test.mjs test/plugin.test.mjs test/tui.test.mjs        # Desktop + TUI halves (build first)
 python -m unittest discover -s test -p "test_*.py"                           # backend unit
-HERMES_AGENT_SRC=<hermes-agent checkout> <hermes venv python> -m unittest discover -s test -p "test_*.py"
-                                                                             # real psutil + FastAPI route, local stand-in for /api/status
+pip install psutil fastapi httpx && python -m unittest discover -s test -p "test_*.py"
+                                                                             # also mounts the real FastAPI route
 ```
+
+CI runs both suites on every push and pull request, and fails if the committed halves do not
+match `src/` after `npm run build`.
 
 ## Known limits
 
@@ -160,9 +184,9 @@ HERMES_AGENT_SRC=<hermes-agent checkout> <hermes venv python> -m unittest discov
 - CPU % is measured between two polls (`psutil.cpu_percent(interval=None)`); several windows
   polling the same server share that window, so each sees a shorter sample. It is displayed
   only; the chip colour no longer uses CPU % or load average.
-- Not verified in the running app yet: the chip's look in the real status bar, and the mount
-  through `hermes serve` with its real `/api/status` (tested against a plain FastAPI router
-  and a local stand-in for `/api/status`).
+- Verified in the real Hermes Desktop status bar. The backend route is tested against a plain
+  FastAPI router and a local stand-in for `/api/status`, not a live `hermes serve`; the TUI card
+  is tested against a stub TUI/SDK, not a live `hermes --tui`.
 - English-only tooltip and settings; fixed thresholds. The refresh period is a setting
   (Settings ▸ Plugins ▸ Refresh every: 1, 3, 5, 10, 30 or 60 s, default 3 s; `/vitals every 10`
   in the TUI). Hosts older than Settings ▸ Plugins show every figure.

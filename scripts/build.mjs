@@ -8,7 +8,9 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
-const read = path => readFileSync(join(root, path), 'utf8')
+// Normalize to LF: a CRLF checkout would otherwise inline `\r\n` into the built halves,
+// making the output differ by platform (and the committed copies drift).
+const read = path => readFileSync(join(root, path), 'utf8').replace(/\r\n/g, '\n')
 
 // `import { … } from './x.js'` on one line; the module's exports become plain declarations.
 function inline(source, modules) {

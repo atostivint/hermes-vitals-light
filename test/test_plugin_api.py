@@ -21,6 +21,18 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parent.parent
 SRC = os.environ.get("HERMES_AGENT_SRC")
 
+# The RealRoute tests mount the router on a real FastAPI app: they need psutil, FastAPI and
+# httpx (all present in a Hermes environment). A checkout in HERMES_AGENT_SRC is optional, it
+# is only added to sys.path.
+try:
+    import fastapi  # noqa: F401
+    import httpx  # noqa: F401
+    import psutil  # noqa: F401
+except ImportError:
+    ROUTE_DEPS = False
+else:
+    ROUTE_DEPS = True
+
 
 def load_plugin_api():
     # Same way the dashboard loads it: a standalone module from its file path.
@@ -559,11 +571,11 @@ class Stream(unittest.TestCase):
         self.assertEqual(parse(None), frozenset())
 
 
-@unittest.skipUnless(SRC, "set HERMES_AGENT_SRC to run with the Hermes environment")
+@unittest.skipUnless(ROUTE_DEPS, "install psutil, fastapi and httpx to run the mounted route")
 class RealRoute(unittest.TestCase):
     # Temp HERMES_HOME, so nothing here touches the real one.
     def setUp(self):
-        if SRC not in sys.path:
+        if SRC and SRC not in sys.path:
             sys.path.insert(0, SRC)
         home = tempfile.TemporaryDirectory()
         self.addCleanup(home.cleanup)

@@ -1,0 +1,6 @@
+# Build artifacts are committed, so a CRLF checkout would make every build look dirty.
+* text=auto eol=lf
+*.png binary
+*.gif binary
+*.jpg binary
+*.ico binary
