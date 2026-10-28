@@ -24,8 +24,9 @@ The first icon is a health light: `pulse` normally, `watch` when the last succes
 1.5 s or more (the chip adds the duration, e.g. `· 2.5 s`), `clock` after a timeout (chip note
 `· timeout`), `debug-disconnect` when the backend is stopped or unreachable (chip note
 `· offline`), `plug` when the backend half is missing (chip note `· plugin`), and `warning` for
-another backend error (chip note `· error`). The tooltip gives the exact poll duration, the age
-of the last reading and the reason.
+another backend error (chip note `· error`). A stale or unavailable chip gets a compact two-line
+tooltip (state title + last-reading/attempt line) instead of the full host/load detail, so an
+offline backend does not open a large panel. Healthy polls keep the full tooltip.
 
 `👥 N` is the number of active sessions on the connected server: Hermes's own
 `active_sessions` figure from its public `GET /api/status` (sessions not ended and active in

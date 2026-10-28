@@ -25,6 +25,7 @@ import {
   chipLabel,
   INTERVALS,
   nextPollDelay,
+  problemLines,
   refreshInterval,
   REQUEST_TIMEOUT_MS,
   shownFigures,
@@ -238,6 +239,20 @@ function createLoadStore(ctx, prefs, interval) {
 const CHIP_CLASS =
   'inline-flex h-full shrink-0 items-center gap-1 whitespace-nowrap px-1.5 text-[0.6875rem] tabular-nums text-(--ui-text-tertiary)'
 
+// Error/offline tooltips are deliberately compact: a title and one reason.
+// The last figures are still on the chip; the full detail is for healthy polls.
+function problemTip(state) {
+  const [title, detail] = problemLines(state)
+
+  return jsx('div', {
+    className: 'flex max-w-64 flex-col gap-0.5 leading-[1.35]',
+    children: [
+      jsx('div', { className: 'font-medium', children: title }),
+      jsx('div', { className: 'font-normal opacity-80', children: detail })
+    ]
+  })
+}
+
 function LoadChip({ prefs, store }) {
   const state = useSyncExternalStore(store.subscribe, store.get)
   const shown = useValue(prefs)
@@ -258,7 +273,7 @@ function LoadChip({ prefs, store }) {
     const label = ['CPU —', stateNote(state)].filter(Boolean).join(' · ')
 
     return jsx(Tip, {
-      label: `Hermes Vitals Light unavailable: ${statusLines(state).join(' ')}`,
+      label: problemTip(state),
       children: jsxs('span', {
         className: CHIP_CLASS,
         children: [iconNode, jsx('span', { children: label })]
@@ -271,13 +286,17 @@ function LoadChip({ prefs, store }) {
   // Every figure switched off still leaves the icon, so the tooltip stays reachable.
   const base = chipLabel(stats, shown)
   const label = [base, stateNote(state)].filter(Boolean).join(' · ')
-  const detail = [...statusLines(state), ...tooltipLines(stats)]
+  const detail = stale
+    ? problemTip(state)
+    : jsx('div', {
+        className: 'flex flex-col gap-0.5 tabular-nums',
+        children: [...statusLines(state), ...tooltipLines(stats)].map((line, index) =>
+          jsx('div', { children: line }, `${index}:${line}`)
+        )
+      })
 
   return jsx(Tip, {
-    label: jsx('div', {
-      className: 'flex flex-col gap-0.5 tabular-nums',
-      children: detail.map((line, index) => jsx('div', { children: line }, `${index}:${line}`))
-    }),
+    label: detail,
     children: jsxs('span', {
       className: CHIP_CLASS,
       style: { color: VERDICT_COLOR[waitedVerdict(stats)] },

@@ -485,6 +485,73 @@ function statusLines(state, now = Date.now()) {
   return lines
 }
 
+const PROBLEM_TITLE = {
+  backend: 'Cannot read system load',
+  missing: 'Backend plugin missing',
+  network: 'Hermes backend offline',
+  offline: 'Hermes backend offline',
+  server: 'Hermes backend error',
+  timeout: 'Hermes backend timed out'
+}
+
+// Two short lines for an error tooltip: a title and one compact reason line.
+// The detailed figures stay on the chip; the tooltip is about the problem.
+function problemLines(state, now = Date.now()) {
+  const kind = state.error?.kind
+  const title = PROBLEM_TITLE[kind] ?? 'Hermes backend unavailable'
+
+  if (state.status === 'unavailable') {
+    if (kind === 'missing') {
+      return [title, 'Enable hermes-vitals-light, then restart.']
+    }
+
+    if (kind === 'offline' || kind === 'network') {
+      return [title, 'Stopped or reconnecting.']
+    }
+
+    if (kind === 'timeout') {
+      const took =
+        Number.isFinite(state.durationMs) && state.durationMs >= SLOW_REQUEST_MS
+          ? `No answer after ${formatDuration(state.durationMs)}.`
+          : 'No answer from the server.'
+
+      return [title, took]
+    }
+
+    if (kind === 'backend') {
+      return [title, 'psutil unavailable on the server.']
+    }
+
+    return [title, 'The server answered with an error.']
+  }
+
+  const age = formatAge(now - state.updatedAt)
+  const reading = age === 'just now' ? 'Last reading just now' : `Last reading ${age} ago`
+
+  if (kind === 'missing') {
+    return [title, `${reading} · enable and restart`]
+  }
+
+  if (kind === 'offline' || kind === 'network') {
+    return [title, `${reading} · stopped or reconnecting`]
+  }
+
+  if (kind === 'timeout') {
+    const took =
+      Number.isFinite(state.durationMs) && state.durationMs >= SLOW_REQUEST_MS
+        ? ` · last attempt ${formatDuration(state.durationMs)}`
+        : ''
+
+    return [title, `${reading}${took}`]
+  }
+
+  if (kind === 'backend') {
+    return [title, `${reading} · psutil unavailable`]
+  }
+
+  return [title, reading]
+}
+
 function tooltipLines(stats) {
   const lines = []
 
