@@ -78,13 +78,6 @@ export function waitedVerdict(stats) {
   return Number.isFinite(seconds) && seconds >= WAITED_BUSY_SECONDS ? 'busy' : 'ok'
 }
 
-// 1-minute load per core, as a percent: a load of 4 on 4 cores is a saturated box.
-export function loadPercent(stats) {
-  const load1 = stats.load_avg?.[0]
-
-  return Number.isFinite(load1) && stats.cpu_count > 0 ? (load1 / stats.cpu_count) * 100 : undefined
-}
-
 // What the chip can show, in chip order; each one is a switch in the settings page.
 // `tui: false`: the TUI card has no server to ask, so it does not offer the figure.
 export const CHIP_FIGURES = [
@@ -169,22 +162,6 @@ export function chipLabel(stats, shown = ALL_SHOWN) {
   return parts.join(' · ')
 }
 
-// The percents that colour the chip: only the figures it shows.
-export function shownPercents(stats, shown = ALL_SHOWN) {
-  return [
-    shown.cpu ? stats.cpu_percent : undefined,
-    shown.load ? loadPercent(stats) : undefined,
-    shown.ram ? stats.memory?.percent : undefined
-  ]
-}
-
-// The chip takes the colour of its worst figure.
-export function levelOf(...percents) {
-  const worst = Math.max(...percents.filter(Number.isFinite), 0)
-
-  return worst >= 90 ? 'critical' : worst >= 75 ? 'warning' : 'normal'
-}
-
 // A server without the backend half answers 404 on every poll; back off instead of
 // hammering it, and recover at the normal cadence on the first success.
 export function nextPollDelay(failures, baseMs = POLL_MS) {
@@ -236,34 +213,6 @@ export function formatDuration(ms) {
   const seconds = ms / 1000
 
   return `${seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)} s`
-}
-
-// The short text appended to the chip only when something needs attention:
-// a slow poll duration, "offline" or "timeout". Empty in normal operation.
-export function stateNote(state) {
-  if (state.status === 'ok' && Number.isFinite(state.durationMs) && state.durationMs >= SLOW_REQUEST_MS) {
-    return formatDuration(state.durationMs)
-  }
-
-  if (state.status === 'stale' || state.status === 'unavailable') {
-    if (state.error?.kind === 'offline' || state.error?.kind === 'network') {
-      return 'offline'
-    }
-
-    if (state.error?.kind === 'timeout') {
-      return 'timeout'
-    }
-
-    if (state.error?.kind === 'missing') {
-      return 'plugin'
-    }
-
-    if (state.error?.kind) {
-      return 'error'
-    }
-  }
-
-  return ''
 }
 
 // The tooltip lines that explain why the figures are old, or why there are none.

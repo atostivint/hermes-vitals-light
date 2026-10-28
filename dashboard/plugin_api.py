@@ -2,7 +2,7 @@
 
 One read-only route, ``GET /stats``: CPU and memory of the machine running the Hermes backend the
 Desktop is connected to (``hermes serve`` runs this file in-process, so a remote gateway reports
-the remote box, not the Desktop's), plus how many sessions each client holds right now.
+the remote box, not the Desktop's), plus how many sessions are active right now.
 
 ``waited`` is Linux PSI CPU pressure: the ``some avg60`` field of ``/proc/pressure/cpu`` scaled
 to the seconds of the last minute at least one task was runnable but stalled waiting for a CPU
@@ -59,7 +59,7 @@ from typing import Any, Iterable
 logger = logging.getLogger(__name__)
 
 try:  # FastAPI exists in the serve/dashboard env, not in the plugin's unit-test env.
-    from fastapi import APIRouter, Request
+    from fastapi import APIRouter, Request, Response
 
     router = APIRouter()
 except ImportError:  # pragma: no cover - unit env without FastAPI
@@ -467,7 +467,8 @@ if router is not None:
 
     # ``?skip=clients,processes``: the counts the chip hides are not measured at all.
     @router.get("/stats")
-    def stats(request: Request, skip: str = "") -> dict[str, Any]:
+    def stats(request: Request, response: Response, skip: str = "") -> dict[str, Any]:
+        response.headers["Cache-Control"] = "no-store"
         skipped = parse_skip(skip)
         return snapshot(
             clients="clients" not in skipped,

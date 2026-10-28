@@ -10,15 +10,12 @@ import {
   formatDuration,
   formatFree,
   formatPercent,
-  levelOf,
-  loadPercent,
   MAX_BACKOFF_MS,
   nextPollDelay,
   POLL_MS,
   problemLines,
   shownFigures,
   SLOW_REQUEST_MS,
-  stateNote,
   statusLines,
   tooltipLines,
   waitedLabel,
@@ -86,14 +83,6 @@ test('a server that reports no load average keeps a CPU + RAM chip', () => {
   assert.equal(chipLabel({ cpu_percent: 5, memory: { percent: 10 } }), 'CPU 5% · RAM 10%')
 })
 
-test('load is weighed per core, so a saturated box colours the chip', () => {
-  const stats = { cpu_count: 4, load_avg: [3.8, 2, 1] }
-
-  assert.equal(loadPercent(stats), 95)
-  assert.equal(levelOf(10, loadPercent(stats), 20), 'critical')
-  assert.equal(loadPercent({ load_avg: [1, 1, 1] }), undefined)
-})
-
 test('bytes read in binary units, one decimal below 10', () => {
   assert.equal(formatBytes(512), '512 B')
   assert.equal(formatBytes(3.5 * 1024 ** 3), '3.5 GB')
@@ -104,13 +93,6 @@ test('bytes read in binary units, one decimal below 10', () => {
 test('a missing percent shows a dash, never NaN%', () => {
   assert.equal(formatPercent(23.4), '23%')
   assert.equal(formatPercent(undefined), '—')
-})
-
-test('levelOf maps a percent to a severity level', () => {
-  assert.equal(levelOf(10, 50), 'normal')
-  assert.equal(levelOf(80, 20), 'warning')
-  assert.equal(levelOf(20, 95), 'critical')
-  assert.equal(levelOf(undefined, undefined), 'normal')
 })
 
 test('polling backs off on failure, capped, and resets on success', () => {
@@ -224,16 +206,9 @@ test('problem tooltips are two short lines, especially when offline', () => {
   ])
 })
 
-test('a slow but successful poll is called out in the tooltip and on the chip', () => {
+test('a slow but successful poll is called out in the tooltip', () => {
   assert.deepEqual(statusLines({ durationMs: 2500, status: 'ok' }), ['Hermes is slow: the last poll took 2.5 s.'])
   assert.deepEqual(statusLines({ durationMs: 420, status: 'ok' }), [])
-  assert.equal(stateNote({ durationMs: 2500, status: 'ok' }), '2.5 s')
-  assert.equal(stateNote({ durationMs: 420, status: 'ok' }), '')
-  assert.equal(stateNote({ error: { kind: 'offline' }, status: 'stale' }), 'offline')
-  assert.equal(stateNote({ error: { kind: 'network' }, status: 'stale' }), 'offline')
-  assert.equal(stateNote({ error: { kind: 'timeout' }, status: 'stale' }), 'timeout')
-  assert.equal(stateNote({ error: { kind: 'missing' }, status: 'stale' }), 'plugin')
-  assert.equal(stateNote({ error: { kind: 'backend' }, status: 'stale' }), 'error')
 })
 
 test('an empty chip has no age, just the error and the retry', () => {
