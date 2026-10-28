@@ -253,8 +253,8 @@ function LoadChip({ prefs, store }) {
   })
 
   if (state.status === 'unavailable') {
-    // The note makes a stopped backend or a timeout visible without hovering.
-    const label = ['CPU —', stateNote(state)].filter(Boolean).join(' · ')
+    // The health icon carries the reason; keep the badge itself short.
+    const label = 'CPU —'
 
     return jsx(Tip, {
       label: problemTip(state),
@@ -268,8 +268,7 @@ function LoadChip({ prefs, store }) {
   const { stats } = state
   const stale = state.status === 'stale'
   // Every figure switched off still leaves the icon, so the tooltip stays reachable.
-  const base = chipLabel(stats, shown)
-  const label = [base, stateNote(state)].filter(Boolean).join(' · ')
+  const label = chipLabel(stats, shown)
   const detail = stale
     ? problemTip(state)
     : jsx('div', {
