@@ -143,6 +143,23 @@ test('waited verdict uses PSI and free RAM, not CPU or load', () => {
   assert.equal(waitedVerdict({ waited: { seconds: 5, verdict: 'busy' } }), 'busy')
 })
 
+test('a macOS or Windows server without PSI still shows free RAM and no waited figure', () => {
+  const stats = {
+    cpu_percent: 7,
+    free: 4 * 1024 ** 3,
+    load_avg: [0.5, 0.4, 0.3],
+    memory: { percent: 50, total: 8 * 1024 ** 3, used: 4 * 1024 ** 3 }
+  }
+
+  assert.equal(chipLabel(stats), 'CPU 7% · Load 0.50 · 4.0G free')
+  assert.equal(waitedVerdict(stats), 'ok')
+  assert.deepEqual(tooltipLines(stats), [
+    'CPU 7%',
+    'Load 0.5 / 0.4 / 0.3',
+    'RAM 4.0 GB / 8.0 GB (50%) · 4.0G free'
+  ])
+})
+
 test('the chip shows free RAM and waited alongside the other figures', () => {
   assert.equal(
     chipLabel({

@@ -49,7 +49,7 @@ export function formatRtt(ms) {
   return ms < 1 ? '<1 ms' : `${Math.round(ms)} ms`
 }
 
-// MemAvailable in GiB, exactly as the chip shows it: "3.8G free".
+// Available RAM in GiB, exactly as the chip shows it: "3.8G free".
 export function formatFree(bytes) {
   if (!Number.isFinite(bytes) || bytes < 0) {
     return '?'
@@ -91,7 +91,11 @@ export function waitedVerdict(stats) {
 export const CHIP_FIGURES = [
   { description: 'CPU use since the previous poll.', id: 'cpu', label: 'CPU' },
   { description: '1-minute load average (servers that report one).', id: 'load', label: 'Load average' },
-  { description: 'Free memory (Linux MemAvailable).', id: 'ram', label: 'RAM' },
+  {
+    description: 'Free memory (MemAvailable on Linux, available RAM on macOS/Windows).',
+    id: 'ram',
+    label: 'RAM'
+  },
   {
     description: 'Seconds in the last minute at least one task waited for CPU (Linux PSI).',
     id: 'waited',

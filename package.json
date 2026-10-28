@@ -1,9 +1,9 @@
 {
   "name": "hermes-vitals-light",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
-  "description": "Hermes Desktop and TUI plugin: CPU, load, RAM, CPU pressure and RTT of the connected server in the status bar.",
+  "description": "Hermes Desktop and TUI plugin: CPU, load, RAM, CPU pressure (Linux PSI) and RTT of the connected server in the status bar.",
   "license": "MIT",
   "homepage": "https://github.com/atostivint/hermes-vitals-light#readme",
   "repository": {
@@ -26,7 +26,7 @@
   },
   "scripts": {
     "build": "node scripts/build.mjs && node --check desktop/plugin.js && node --check tui/hermes-vitals-light.mjs",
-    "test": "node --test test/dashboard.test.mjs test/load.test.mjs test/plugin.test.mjs test/tui.test.mjs",
+    "test": "node --test test/dashboard.test.mjs test/install.test.mjs test/load.test.mjs test/plugin.test.mjs test/tui.test.mjs",
     "install:plugin": "node scripts/build.mjs && node scripts/install.mjs"
   }
 }

@@ -3,9 +3,10 @@
 name: hermes-vitals-light
 id: hermes-vitals-light
 kind: standalone
-version: 0.1.0
+version: 0.1.1
 requires_hermes: ">=0.22"
 description: >
-  Shows the CPU, memory, load and CPU pressure of the server the Hermes Desktop is
-  connected to, plus the round-trip time to it, as a chip in the Desktop status bar.
+  Shows the CPU, memory, load and, on Linux, CPU pressure of the server the Hermes
+  Desktop is connected to, plus the round-trip time to it, as a chip in the Desktop
+  status bar.
 provides: []

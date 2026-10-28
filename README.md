@@ -5,17 +5,18 @@
 [![CI](https://github.com/atostivint/hermes-vitals-light/actions/workflows/ci.yml/badge.svg)](https://github.com/atostivint/hermes-vitals-light/actions/workflows/ci.yml)
 
 Hermes **Desktop** and **TUI** plugin. The Desktop status-bar chip shows the CPU, load average, free
-RAM, CPU pressure and RTT of the server it is connected to:
+RAM, CPU pressure (Linux PSI) and RTT of the server it is connected to:
 `CPU 23% · Load 1.20 · 3.8G free · waited 15s/60 · RTT 12 ms · 👥 2 · ⚙ 3`. On a remote gateway (SSH, URL + token) it
 measures the remote box, not your PC. Load is the 1-minute average (omitted when the server reports
 none); the tooltip adds hostname, cores, 5/15-min load, RAM used / total, free RAM, waited and RTT.
 
 `waited 15s/60` is Linux PSI CPU pressure: the seconds of the last minute at least one task was
 runnable but stalled waiting for a CPU, computed as `round(avg60 * 0.6)` from the `some` line of
-`/proc/pressure/cpu`. It is omitted when PSI is unreadable (non-Linux, containers without PSI).
-`3.8G free` is `MemAvailable` from `/proc/meminfo` in GiB, one decimal. Both come from one
-stateless two-file read, with no psutil, subprocess or cache. If RAM or PSI is unreadable, the chip
-falls back to the old percentage / omits `waited`.
+`/proc/pressure/cpu`. It is omitted when PSI is unreadable (macOS, Windows, containers without PSI).
+`3.8G free` is `MemAvailable` from `/proc/meminfo` on Linux and psutil's available RAM on macOS and
+Windows, in GiB, one decimal. The Linux figures come from one stateless two-file read, with no
+psutil, subprocess or cache. If free RAM is unreadable, the chip falls back to the old percentage;
+`waited` is simply omitted where the kernel has no PSI.
 
 `RTT 12 ms` is the round trip of a WebSocket `ping` over the Desktop's live gateway socket,
 measured in the Desktop half (`host.request('ping')`); it is left out when that socket cannot
@@ -24,9 +25,10 @@ answer. It is the connection the app actually uses, not ICMP ping and not the `/
 it. RTT does not change the chip colour.
 
 The chip colour comes from the waited verdict, not from CPU or load: **red (stuck)** at
-`waited >= 25` or less than 1 GiB free, **amber (busy)** at `waited >= 10`, otherwise normal. When
-a poll fails, the chip keeps the last figures, dimmed, and its tooltip says how old they are and
-why; it shows `CPU —` only when it has never received a reading from the current server.
+`waited >= 25` or less than 1 GiB free, **amber (busy)** at `waited >= 10`, otherwise normal. On
+macOS and Windows, where there is no PSI, only the free-RAM rule applies. When a poll fails, the
+chip keeps the last figures, dimmed, and its tooltip says how old they are and why; it shows
+`CPU —` only when it has never received a reading from the current server.
 
 The first icon is a health light: `pulse` normally, `watch` when the last successful poll took
 1.5 s or more, `clock` after a timeout, `debug-disconnect` when the backend is stopped or
@@ -86,7 +88,7 @@ Three halves, one package (same layout as other unified Hermes plugins):
 | Half | Where it runs | What it does |
 |---|---|---|
 | `desktop/plugin.js` | Hermes Desktop (renderer) | Chip in `statusBar.right`; polls `/stats` every 3 s by default (Refresh every), times a gateway `ping` for RTT, skips while the window is hidden, re-polls at once when it becomes visible or on a connection/profile switch. A failed poll keeps the last figures, dimmed. |
-| `dashboard/plugin_api.py` | The Hermes backend you connect to | Read-only `GET /api/plugins/hermes-vitals-light/stats` via `psutil` (a Hermes core dependency), a loopback `GET /api/status` on the server it runs in, and one two-file `/proc` read for PSI/free RAM. Returns only load figures, the hostname, the session total, per-command process counts and the waited verdict. Both counts are cached and refreshed in the background, so a request never waits for them. |
+| `dashboard/plugin_api.py` | The Hermes backend you connect to | Read-only `GET /api/plugins/hermes-vitals-light/stats` via `psutil` (a Hermes core dependency), a loopback `GET /api/status` on the server it runs in, and, on Linux, one two-file `/proc` read for PSI/free RAM. Returns only load figures, the hostname, the session total, per-command process counts and the waited verdict. Both counts are cached and refreshed in the background, so a request never waits for them. |
 | `tui/hermes-vitals-light.mjs` | Hermes TUI (`<HERMES_HOME>/tui-widgets/`) | Ambient widget app `/vitals`; inlines `plugin_api.py` and runs it as a child (`python -c`) for the figures. |
 
 Without the backend half on the server, the chip shows `CPU —` (tooltip explains) and the
@@ -95,13 +97,13 @@ poll backs off up to 30 s.
 `/stats` is read-only and goes through the backend's usual authentication. It exposes the
 hostname, the load figures and the two counts; no session ids, process list, paths or environment.
 
-**What it reads, and where it goes.** The backend half reads psutil's CPU / load / memory figures,
-two Linux `/proc` files (PSI and `MemAvailable`), the process table (pid, parent pid and command
-line) to count Hermes executables, and the server's own loopback `GET /api/status` for the session
-total. Beyond the Desktop/TUI's normal connection to its Hermes backend, the only network call the
-plugin makes is that loopback ask; it sends nothing to a third party and has no telemetry or
-self-updater. The TUI half runs the same `plugin_api.py` as a `python -c` child of the TUI, so it
-reads the machine the TUI runs on.
+**What it reads, and where it goes.** The backend half reads psutil's CPU / load / memory figures
+(including available RAM), two Linux `/proc` files (PSI and `MemAvailable`) when it runs on Linux,
+the process table (pid, parent pid and command line) to count Hermes executables, and the server's
+own loopback `GET /api/status` for the session total. Beyond the Desktop/TUI's normal connection to
+its Hermes backend, the only network call the plugin makes is that loopback ask; it sends nothing
+to a third party and has no telemetry or self-updater. The TUI half runs the same `plugin_api.py`
+as a `python -c` child of the TUI, so it reads the machine the TUI runs on.
 
 The dashboard half is API-only: `dashboard/manifest.json` registers a hidden `/vitals` page so the
 web dashboard has a bundle to load beside `plugin_api.py`; the visible UI is the Desktop chip and the
@@ -113,7 +115,8 @@ TUI card.
   (TUI half).
 - The backend half needs `psutil` and FastAPI, both already present in a `hermes serve`
   environment; no extra dependency is installed.
-- `waited` and `free` read Linux `/proc`; elsewhere the chip falls back to RAM % and omits `waited`.
+- Backend and TUI halves run on Linux, macOS and Windows. `waited` needs Linux PSI; `free` uses
+  `MemAvailable` on Linux and psutil's available RAM on macOS/Windows.
 - Node.js 20+ is needed only to build from source.
 
 ## Install
@@ -164,7 +167,7 @@ added after these figures and was not measured separately: it adds one ask of th
 | `/stats` in `hermes serve`, everything on | the load figures only (well under 1 ms warm); at most one process scan per 5 s (~55 ms of CPU on 500 processes) and one `/api/status` ask per 15 s run in the background |
 | `/stats?skip=processes` | ~0.1 ms, plus the session count refreshed in the background every 15 s |
 | `/stats?skip=clients,processes` | ~0.1 ms |
-| PSI + free RAM read | two small `/proc` files; ~41 µs mean / ~38 µs median of CPU per call on the deployment host (p99 84 µs), no psutil, subprocess, thread or cache |
+| PSI + free RAM read (Linux) | two small `/proc` files; ~41 µs mean / ~38 µs median of CPU per call on the deployment host (p99 84 µs), no psutil, subprocess, thread or cache |
 | First process scan after start | runs in the background; ~5 s of one core on Windows (no request waits for it) |
 | TUI card child (`python -c`) | ~60 MB RSS (launcher + python); ~2 % of a core with processes on (scan cached 5 s), ~0.4 % off |
 | Desktop half | one ~260-byte request every 3 s, none while the window is hidden; RTT adds one gateway `ping` per poll while shown |
@@ -178,8 +181,8 @@ pip install psutil fastapi httpx && python -m unittest discover -s test -p "test
                                                                              # also mounts the real FastAPI route
 ```
 
-CI runs both suites on every push and pull request, and fails if the committed halves do not
-match `src/` after `npm run build`.
+CI runs both suites on Linux, macOS and Windows on every push and pull request, and fails if the
+committed halves do not match `src/` after `npm run build`.
 
 ## Known limits
 
@@ -202,12 +205,14 @@ match `src/` after `npm run build`.
 - RTT is the Desktop↔gateway WebSocket path: it includes the app's own scheduling, and is left
   out when the gateway socket is down or the host has no `host.request`. It is not an ICMP ping,
   and it does not affect the health icon or the chip colour.
-- `waited` is Linux-only: it is omitted when `/proc/pressure/cpu` is unreadable (non-Linux, or a
-  container without PSI). `free` is `MemAvailable`, one decimal GiB; the chip falls back to the
-  old RAM percentage when `/proc/meminfo` is unreadable. The chip colour uses only the waited
-  verdict and free RAM: `stuck` at 25 waited seconds or under 1 GiB free, `busy` at 10 waited
-  seconds, `ok` otherwise.
+- `waited` is Linux-only: it is omitted when `/proc/pressure/cpu` is unreadable (macOS, Windows, or
+  a container without PSI). `free` is `MemAvailable` on Linux and psutil's available RAM elsewhere,
+  one decimal GiB; the chip falls back to the old RAM percentage only when neither source is
+  readable. The chip colour uses the waited verdict and free RAM: `stuck` at 25 waited seconds or
+  under 1 GiB free, `busy` at 10 waited seconds, `ok` otherwise.
 - Client polls are clamped to at least 0.5 s.
+- Load average is native on Linux and macOS; on Windows psutil emulates it, so the first minutes
+  after a backend start can read `0.00`. It is display-only and does not affect the chip colour.
 
 - CPU % is measured between two polls (`psutil.cpu_percent(interval=None)`); several windows
   polling the same server share that window, so each sees a shorter sample. It is displayed
@@ -218,8 +223,8 @@ match `src/` after `npm run build`.
 - English-only tooltip and settings; fixed thresholds. The refresh period is a setting
   (Settings ▸ Plugins ▸ Refresh every: 1, 3, 5, 10, 30 or 60 s, default 3 s; `/vitals every 10`
   in the TUI). Hosts older than Settings ▸ Plugins show every figure.
-- CPU, load and RAM are always measured (one psutil call each, under 2 ms), and waited/free are
-  one two-file `/proc` read; switching any figure off only hides it.
+- CPU, load and RAM are always measured (one psutil call each, under 2 ms), and on Linux waited/free
+  are one two-file `/proc` read; switching any figure off only hides it.
 - TUI: a TUI attached to a remote gateway still shows its own machine. On Windows psutil's
   first process scan takes ~13 s of one core (750 processes; later scans ~0.1 s), so `⚙ N`
   shows up that long after the card's first figures — the other figures are not delayed.

@@ -60,10 +60,23 @@ class CollectStats(unittest.TestCase):
     def test_only_load_figures_and_hostname_leave_the_process(self):
         stats = load_plugin_api().collect_stats(FakePsutil())
 
-        self.assertEqual(set(stats), {"ok", "hostname", "cpu_percent", "cpu_count", "memory", "load_avg"})
+        self.assertEqual(set(stats), {"ok", "hostname", "cpu_percent", "cpu_count", "memory", "free", "load_avg"})
         self.assertEqual(stats["cpu_percent"], 42.0)
         self.assertEqual(stats["memory"], {"total": 1000, "used": 750, "percent": 75.0})
+        self.assertEqual(stats["free"], 250)
         self.assertEqual(stats["load_avg"], [1.23, 0.5, 0.25])
+
+    def test_free_ram_comes_from_psutil_when_proc_is_unavailable(self):
+        # macOS and Windows have no /proc/meminfo: the portable available figure fills `free`.
+        api = load_plugin_api()
+        stats = api.collect_stats(FakePsutil())
+
+        self.assertEqual(stats["free"], 250)
+        with mock.patch("builtins.open", side_effect=OSError("no /proc")):
+            self.assertEqual(api.read_pressure(system="linux"), {})
+        api.collect_stats = lambda: stats
+        api.read_pressure = lambda: {}
+        self.assertEqual(api.snapshot(processes=False)["free"], 250)
 
     def test_a_host_without_load_average_omits_it(self):
         self.assertNotIn("load_avg", load_plugin_api().collect_stats(FakePsutil(loadavg=False)))
@@ -81,6 +94,7 @@ class CollectStats(unittest.TestCase):
         self.assertTrue(stats["ok"])
         self.assertEqual(stats["cpu_percent"], 42.0)
         self.assertNotIn("memory", stats)
+        self.assertNotIn("free", stats)
 
     def test_a_broken_load_average_keeps_cpu_and_memory(self):
         class BrokenLoad(FakePsutil):
@@ -155,23 +169,31 @@ class Pressure(unittest.TestCase):
         api = load_plugin_api()
 
         with mock.patch("builtins.open", side_effect=self.fake_open()) as opened:
-            result = api.read_pressure()
+            result = api.read_pressure(system="linux")
 
         self.assertEqual(result["free"], 3891234 * 1024)
         self.assertEqual(result["waited"], {"seconds": 13, "verdict": "busy"})
         self.assertEqual(opened.call_count, 2, "one read is exactly the two /proc files")
 
+    def test_non_linux_does_not_touch_the_proc_filesystem(self):
+        api = load_plugin_api()
+
+        with mock.patch("builtins.open") as opened:
+            self.assertEqual(api.read_pressure(system="darwin"), {})
+            self.assertEqual(api.read_pressure(system="win32"), {})
+            opened.assert_not_called()
+
     def test_missing_proc_files_omit_everything_without_raising(self):
         api = load_plugin_api()
 
         with mock.patch("builtins.open", side_effect=OSError("no /proc")):
-            self.assertEqual(api.read_pressure(), {})
+            self.assertEqual(api.read_pressure(system="linux"), {})
 
     def test_missing_pressure_keeps_free(self):
         api = load_plugin_api()
 
         with mock.patch("builtins.open", side_effect=self.fake_open(pressure=False)):
-            result = api.read_pressure()
+            result = api.read_pressure(system="linux")
 
         self.assertEqual(result["free"], 3891234 * 1024)
         self.assertNotIn("waited", result)
@@ -180,7 +202,7 @@ class Pressure(unittest.TestCase):
         api = load_plugin_api()
 
         with mock.patch("builtins.open", side_effect=self.fake_open(meminfo=False)):
-            result = api.read_pressure()
+            result = api.read_pressure(system="linux")
 
         self.assertEqual(result["waited"], {"seconds": 13, "verdict": "busy"})
         self.assertNotIn("free", result)
@@ -201,11 +223,30 @@ class SnapshotPressure(unittest.TestCase):
         self.assertEqual(body["free"], 4 * 1024**3)
         self.assertTrue(body["ok"])
 
-    def test_missing_pressure_omits_the_fields(self):
+    def test_missing_pressure_omits_the_fields_when_no_source_has_free(self):
         body = self.snapshot({})
 
         self.assertNotIn("waited", body)
         self.assertNotIn("free", body)
+
+    def test_missing_pressure_keeps_the_portable_free_ram(self):
+        api = load_plugin_api()
+        api.collect_stats = lambda: {"ok": True, "free": 250}
+        api.read_pressure = lambda: {}
+
+        body = api.snapshot(processes=False)
+
+        self.assertEqual(body["free"], 250)
+        self.assertNotIn("waited", body)
+
+    def test_the_verdict_uses_the_free_ram_that_is_returned(self):
+        api = load_plugin_api()
+        api.collect_stats = lambda: {"ok": True, "free": 250}
+        api.read_pressure = lambda: {"waited": {"seconds": 5, "verdict": "ok"}}
+
+        body = api.snapshot(processes=False)
+
+        self.assertEqual(body["waited"], {"seconds": 5, "verdict": "stuck"})
 
 
 class FakeStatus:
@@ -444,10 +485,12 @@ class HermesCommand(unittest.TestCase):
         command = load_plugin_api().hermes_command
         cases = {
             ("/home/u/.local/bin/hermes", "serve", "--port", "9119"): "serve",
+            ("/opt/homebrew/bin/hermes", "serve"): "serve",
             ("hermes", "-p", "work", "gateway", "run"): "gateway",
             ("hermes",): "chat",
             (r"C:\Users\u\AppData\Local\hermes\venv\Scripts\hermes.exe", "--profile", "x"): "chat",
             ("/usr/bin/python3.12", "-u", "-m", "hermes_cli.main", "dashboard"): "dashboard",
+            ("/opt/homebrew/bin/python3.12", "-m", "hermes_cli.main", "serve"): "serve",
             ("python3", "-X", "utf8", "/opt/hermes/bin/hermes", "chat"): "chat",
             (r"C:\venv\Scripts\python.exe", r"C:\venv\Scripts\hermes.exe", "serve"): "serve",
             ("hermes-acp",): "acp",
@@ -461,6 +504,7 @@ class HermesCommand(unittest.TestCase):
         for argv in (
             [r"C:\Users\u\AppData\Local\hermes\hermes-agent\apps\desktop\release\win-unpacked\Hermes.exe"],
             ["/Applications/Hermes.app/Contents/MacOS/Hermes", "--type=renderer"],
+            ["/Applications/Hermes.app/Contents/Frameworks/Hermes Helper.app/Contents/MacOS/Hermes Helper"],
             ["python3", "onenote_mcp_server.py"],
             ["python3", "-m", "http.server"],
             ["vim", "hermes.py"],
@@ -620,10 +664,10 @@ class RealRoute(unittest.TestCase):
         self.assertGreater(body["memory"]["total"], 0)
         self.assertTrue(0 <= body["cpu_percent"] <= 100)
         self.assertEqual(body["processes"]["total"], sum(body["processes"]["by_command"].values()))
+        self.assertGreaterEqual(body["free"], 0, "free RAM is available on Linux, macOS and Windows")
         if "waited" in body:
             self.assertIsInstance(body["waited"]["seconds"], int)
             self.assertIn(body["waited"]["verdict"], {"ok", "busy", "stuck"})
-            self.assertGreaterEqual(body["free"], 0)
 
     def test_the_route_asks_the_server_it_runs_in_for_the_session_count(self):
         # The test client's server address is the fake status server's: what a real request would carry.

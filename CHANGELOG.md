@@ -4,6 +4,25 @@ All notable changes to this plugin are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] - 2026-10-28
+
+Cross-platform server release: Windows and macOS backends now report free RAM and no longer
+probe Linux `/proc`.
+
+### Fixed
+
+- macOS and Windows backend servers: `free` now comes from psutil's available RAM instead of the
+  Linux-only `/proc/meminfo`, so the chip shows the free-memory figure and the low-memory verdict
+  there too. `waited` stays Linux-only and is omitted, as documented.
+- The source installer now puts the TUI widget in the real Hermes home on Windows
+  (`%LOCALAPPDATA%\hermes\tui-widgets`, not `~/.hermes`) and honours `HERMES_HOME` and
+  `HERMES_DATA_DIR_SUFFIX`, like Hermes itself.
+- The TUI feed also accepts `PYTHON` when `HERMES_PYTHON` is not set, as Hermes does.
+
+### Changed
+
+- CI now runs the Node and Python suites on Ubuntu, macOS and Windows.
+
 ## [0.1.0] - 2026-10-28
 
 First public release.

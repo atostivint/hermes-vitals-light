@@ -2,26 +2,17 @@
 // - Desktop: desktop/plugin.js -> <hermes home>/desktop-plugins/hermes-vitals-light/plugin.js
 // - TUI:     tui/hermes-vitals-light.mjs -> <hermes home>/tui-widgets/hermes-vitals-light.mjs
 // Usage: node scripts/install.mjs [--desktop | --tui] [hermesHome]   (both by default)
-// Home resolution mirrors each reader: the Desktop follows hermes_constants ($HERMES_HOME,
-// else %LOCALAPPDATA%\hermes on Windows, else ~/.hermes); the TUI's widget loader reads
-// $HERMES_HOME, else ~/.hermes.
+// Home resolution mirrors hermes_constants.get_hermes_home(): $HERMES_HOME, else
+// %LOCALAPPDATA%\hermes on Windows, else ~/.hermes (macOS and Linux).
 import { copyFileSync, mkdirSync } from 'node:fs'
-import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { hermesHome } from './homes.mjs'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const args = process.argv.slice(2)
 const only = args.find(arg => arg === '--desktop' || arg === '--tui')
-const explicitHome = args.find(arg => !arg.startsWith('--')) || process.env.HERMES_HOME
-
-function desktopHome() {
-  if (process.platform === 'win32') {
-    return join(process.env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local'), 'hermes')
-  }
-
-  return join(homedir(), '.hermes')
-}
+const home = args.find(arg => !arg.startsWith('--')) || hermesHome()
 
 function install(from, dir, name) {
   mkdirSync(dir, { recursive: true })
@@ -30,9 +21,9 @@ function install(from, dir, name) {
 }
 
 if (only !== '--tui') {
-  install('desktop/plugin.js', join(explicitHome || desktopHome(), 'desktop-plugins', 'hermes-vitals-light'), 'plugin.js')
+  install('desktop/plugin.js', join(home, 'desktop-plugins', 'hermes-vitals-light'), 'plugin.js')
 }
 
 if (only !== '--desktop') {
-  install('tui/hermes-vitals-light.mjs', join(explicitHome || join(homedir(), '.hermes'), 'tui-widgets'), 'hermes-vitals-light.mjs')
+  install('tui/hermes-vitals-light.mjs', join(home, 'tui-widgets'), 'hermes-vitals-light.mjs')
 }

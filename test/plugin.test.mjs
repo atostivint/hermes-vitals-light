@@ -194,6 +194,22 @@ test('a reply from /stats paints every figure, coloured by the waited verdict', 
   plugin.dispose()
 })
 
+test('a macOS or Windows server without PSI paints free RAM and no waited figure', async () => {
+  const stats = { ...STATS }
+
+  delete stats.waited
+
+  const plugin = load(async () => stats)
+
+  await plugin.fire()
+
+  const chip = plugin.chip()
+  assert.equal(text(chip.props.children), 'CPU 23% · Load 1.50 · 4.0G free')
+  assert.equal(chip.props.children.props.style.color, undefined)
+  assert.doesNotMatch(text(chip.props.label), /Waited on CPU/)
+  plugin.dispose()
+})
+
 test('RTT is the round trip of a gateway ping, and its switch stops the ping', async () => {
   const pings = []
   const plugin = load(

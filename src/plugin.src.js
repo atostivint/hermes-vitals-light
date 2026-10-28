@@ -1,8 +1,8 @@
 /**
  * hermes-vitals-light — a status-bar chip with the CPU, load average, free RAM, CPU
- * pressure and RTT of the server the Desktop is connected to
+ * pressure (Linux PSI, omitted elsewhere) and RTT of the server the Desktop is connected to
  * ("CPU 23% · Load 1.20 · 3.8G free · waited 15s/60 · RTT 12 ms"), detail in the tooltip.
- * The chip colour comes from the PSI waited verdict, not from CPU % or load.
+ * The chip colour comes from the waited verdict and free RAM, not from CPU % or load.
  *
  * The figures come from the backend half (`dashboard/plugin_api.py`,
  * GET /stats), which runs inside the connected `hermes serve`: on a remote
