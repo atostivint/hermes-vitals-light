@@ -1,13 +1,14 @@
 /**
- * hermes-vitals-light — a status-bar chip with the CPU, load average, free RAM and CPU
- * pressure of the server the Desktop is connected to
- * ("CPU 23% · Load 1.20 · 3.8G free · waited 15s/60"), detail in the tooltip.
+ * hermes-vitals-light — a status-bar chip with the CPU, load average, free RAM, CPU
+ * pressure and RTT of the server the Desktop is connected to
+ * ("CPU 23% · Load 1.20 · 3.8G free · waited 15s/60 · RTT 12 ms"), detail in the tooltip.
  * The chip colour comes from the PSI waited verdict, not from CPU % or load.
  *
  * The figures come from the backend half (`dashboard/plugin_api.py`,
  * GET /stats), which runs inside the connected `hermes serve`: on a remote
- * gateway it measures the remote box. Without that half on the server the chip
- * shows "CPU —" and the poll backs off.
+ * gateway it measures the remote box. RTT is measured by this half over the
+ * live gateway socket (`host.request('ping')`). Without that half on the
+ * server the chip shows "CPU —" and the poll backs off.
  *
  * Settings ▸ Plugins ▸ Hermes Vitals Light switches each figure on or off in the chip and
  * sets the refresh period, 1 s to 1 min, 3 s by default (persisted with ctx.storage); the tooltip has the full detail of what is
@@ -25,6 +26,9 @@ import { useSyncExternalStore } from 'react'
 const VERDICT_COLOR = { busy: '#f59e0b', ok: undefined, stuck: '#ef4444' }
 
 const LOADING = { status: 'loading' }
+
+// A ping that misses its deadline leaves RTT out; the figures keep their own cadence.
+const RTT_TIMEOUT_MS = 2000
 
 // What went wrong, for the tooltip. A 404 is permanent until the backend is
 // changed; a timeout is usually the whole box being busy, not this plugin.
@@ -124,6 +128,32 @@ function createLoadStore(ctx, prefs, interval) {
     }
   }
 
+  // RTT is a gateway `ping` over the live WebSocket, timed here. It runs after the
+  // figures paint, so a slow or half-open socket never delays the chip; the next poll
+  // still replaces the state, which drops a late reply.
+  const measureRtt = (stats, mine) => {
+    if (!prefs.get().rtt || typeof host.request !== 'function') {
+      return
+    }
+
+    const started = performance.now()
+
+    try {
+      host.request('ping', {}, RTT_TIMEOUT_MS).then(
+        () => {
+          if (mine !== generation || !prefs.get().rtt || state.status !== 'ok' || state.stats !== stats) {
+            return
+          }
+
+          set({ ...state, stats: { ...stats, rtt_ms: performance.now() - started } })
+        },
+        () => {} // no gateway or no answer: the chip simply has no RTT
+      )
+    } catch {
+      // A host without the RPC door: leave RTT out, as above.
+    }
+  }
+
   async function poll() {
     if (typeof document !== 'undefined' && document.hidden) {
       schedule(pollMs())
@@ -145,6 +175,7 @@ function createLoadStore(ctx, prefs, interval) {
       if (stats?.ok) {
         failures = 0
         set({ durationMs, stats, status: 'ok', updatedAt: Date.now() })
+        measureRtt(stats, mine)
       } else {
         failures++
         failed({ kind: 'backend' }, durationMs)
@@ -411,6 +442,14 @@ function formatPercent(percent) {
   return Number.isFinite(percent) ? `${Math.round(percent)}%` : '—'
 }
 
+function formatRtt(ms) {
+  if (!Number.isFinite(ms) || ms < 0) {
+    return '—'
+  }
+
+  return ms < 1 ? '<1 ms' : `${Math.round(ms)} ms`
+}
+
 // MemAvailable in GiB, exactly as the chip shows it: "3.8G free".
 function formatFree(bytes) {
   if (!Number.isFinite(bytes) || bytes < 0) {
@@ -458,6 +497,12 @@ const CHIP_FIGURES = [
     description: 'Seconds in the last minute at least one task waited for CPU (Linux PSI).',
     id: 'waited',
     label: 'Waited on CPU'
+  },
+  {
+    description: 'Round-trip time to the connected server (WebSocket ping).',
+    id: 'rtt',
+    label: 'RTT',
+    tui: false
   },
   {
     description: '👥 sessions active in the last 5 minutes on the connected server (Hermes status).',
@@ -517,6 +562,11 @@ function chipLabel(stats, shown = ALL_SHOWN) {
     if (waited) {
       parts.push(waited)
     }
+  }
+
+  // Measured by the Desktop half: no gateway socket, no RTT.
+  if (shown.rtt && Number.isFinite(stats.rtt_ms)) {
+    parts.push(`RTT ${formatRtt(stats.rtt_ms)}`)
   }
 
   // An older backend half sends no `clients`: keep the chip as it was.
@@ -705,6 +755,10 @@ function tooltipLines(stats) {
 
   if (Number.isFinite(stats.waited?.seconds)) {
     lines.push(`Waited on CPU: ${Math.round(stats.waited.seconds)}s/60 (${stats.waited.verdict ?? waitedVerdict(stats)})`)
+  }
+
+  if (Number.isFinite(stats.rtt_ms)) {
+    lines.push(`RTT ${formatRtt(stats.rtt_ms)}`)
   }
 
   const bySurface = Object.entries(stats.clients?.by_surface ?? {})

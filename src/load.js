@@ -41,6 +41,14 @@ export function formatPercent(percent) {
   return Number.isFinite(percent) ? `${Math.round(percent)}%` : '—'
 }
 
+export function formatRtt(ms) {
+  if (!Number.isFinite(ms) || ms < 0) {
+    return '—'
+  }
+
+  return ms < 1 ? '<1 ms' : `${Math.round(ms)} ms`
+}
+
 // MemAvailable in GiB, exactly as the chip shows it: "3.8G free".
 export function formatFree(bytes) {
   if (!Number.isFinite(bytes) || bytes < 0) {
@@ -88,6 +96,12 @@ export const CHIP_FIGURES = [
     description: 'Seconds in the last minute at least one task waited for CPU (Linux PSI).',
     id: 'waited',
     label: 'Waited on CPU'
+  },
+  {
+    description: 'Round-trip time to the connected server (WebSocket ping).',
+    id: 'rtt',
+    label: 'RTT',
+    tui: false
   },
   {
     description: '👥 sessions active in the last 5 minutes on the connected server (Hermes status).',
@@ -147,6 +161,11 @@ export function chipLabel(stats, shown = ALL_SHOWN) {
     if (waited) {
       parts.push(waited)
     }
+  }
+
+  // Measured by the Desktop half: no gateway socket, no RTT.
+  if (shown.rtt && Number.isFinite(stats.rtt_ms)) {
+    parts.push(`RTT ${formatRtt(stats.rtt_ms)}`)
   }
 
   // An older backend half sends no `clients`: keep the chip as it was.
@@ -335,6 +354,10 @@ export function tooltipLines(stats) {
 
   if (Number.isFinite(stats.waited?.seconds)) {
     lines.push(`Waited on CPU: ${Math.round(stats.waited.seconds)}s/60 (${stats.waited.verdict ?? waitedVerdict(stats)})`)
+  }
+
+  if (Number.isFinite(stats.rtt_ms)) {
+    lines.push(`RTT ${formatRtt(stats.rtt_ms)}`)
   }
 
   const bySurface = Object.entries(stats.clients?.by_surface ?? {})

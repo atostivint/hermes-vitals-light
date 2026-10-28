@@ -4,11 +4,11 @@
 
 [![CI](https://github.com/atostivint/hermes-vitals-light/actions/workflows/ci.yml/badge.svg)](https://github.com/atostivint/hermes-vitals-light/actions/workflows/ci.yml)
 
-Hermes **Desktop** and **TUI** plugin that shows the CPU, load average, free RAM and CPU pressure of
-the server the Desktop is connected to as a status-bar chip:
-`CPU 23% · Load 1.20 · 3.8G free · waited 15s/60 · 👥 2 · ⚙ 3`. On a remote gateway (SSH, URL + token) it
+Hermes **Desktop** and **TUI** plugin. The Desktop status-bar chip shows the CPU, load average, free
+RAM, CPU pressure and RTT of the server it is connected to:
+`CPU 23% · Load 1.20 · 3.8G free · waited 15s/60 · RTT 12 ms · 👥 2 · ⚙ 3`. On a remote gateway (SSH, URL + token) it
 measures the remote box, not your PC. Load is the 1-minute average (omitted when the server reports
-none); the tooltip adds hostname, cores, 5/15-min load, RAM used / total, free RAM and waited.
+none); the tooltip adds hostname, cores, 5/15-min load, RAM used / total, free RAM, waited and RTT.
 
 `waited 15s/60` is Linux PSI CPU pressure: the seconds of the last minute at least one task was
 runnable but stalled waiting for a CPU, computed as `round(avg60 * 0.6)` from the `some` line of
@@ -16,6 +16,12 @@ runnable but stalled waiting for a CPU, computed as `round(avg60 * 0.6)` from th
 `3.8G free` is `MemAvailable` from `/proc/meminfo` in GiB, one decimal. Both come from one
 stateless two-file read, with no psutil, subprocess or cache. If RAM or PSI is unreadable, the chip
 falls back to the old percentage / omits `waited`.
+
+`RTT 12 ms` is the round trip of a WebSocket `ping` over the Desktop's live gateway socket,
+measured in the Desktop half (`host.request('ping')`); it is left out when that socket cannot
+answer. It is the connection the app actually uses, not ICMP ping and not the `/stats` request
+(whose process scan can take ~50 ms). The TUI has no server to ping, so its card does not offer
+it. RTT does not change the chip colour.
 
 The chip colour comes from the waited verdict, not from CPU or load: **red (stuck)** at
 `waited >= 25` or less than 1 GiB free, **amber (busy)** at `waited >= 10`, otherwise normal. When
@@ -47,20 +53,20 @@ Windows launcher and its python children, the TUI's `tui_gateway`, a `hermes` an
 from its terminal. The Desktop app itself (`Hermes`, capitalised) is not counted.
 
 **Settings ▸ Plugins ▸ Hermes Vitals Light** has one switch per figure (CPU, Load average, RAM,
-Waited on CPU, Active sessions, Hermes processes), all on by default and saved per Desktop. A
+Waited on CPU, RTT, Active sessions, Hermes processes), all on by default and saved per Desktop. A
 hidden figure is only hidden; the colour still comes from the waited verdict. With everything off
 the chip is just its icon. The tooltip shows the full detail of what is measured. Active sessions
 and Hermes processes switched off are not measured at all: the chip polls
 `/stats?skip=clients,processes` and the server skips the `/api/status` ask and the process scan
-(the TUI does the same for its process option).
+(the TUI does the same for its process option). RTT switched off sends no ping.
 
 ## TUI
 
 In `hermes --tui` the same figures sit in a card docked above the prompt, coloured like the
-chip (the TUI's skin colours), without `👥`: that count comes from a server's `/api/status`
-and the TUI has none to ask. The TUI measures the machine it runs on: the card runs
-`plugin_api.py` with the TUI's own Hermes python, which prints the `/stats` body every 3 s (`/vitals every <s>` changes it)
-for as long as the card is docked.
+chip (the TUI's skin colours), without `👥` or `RTT`: both come from the Desktop's gateway
+(`/api/status` and a WebSocket ping), and the TUI has no server to ask. The TUI measures the
+machine it runs on: the card runs `plugin_api.py` with the TUI's own Hermes python, which prints
+the `/stats` body every 3 s (`/vitals every <s>` changes it) for as long as the card is docked.
 
 | Command | Effect |
 |---|---|
@@ -79,7 +85,7 @@ Three halves, one package (same layout as other unified Hermes plugins):
 
 | Half | Where it runs | What it does |
 |---|---|---|
-| `desktop/plugin.js` | Hermes Desktop (renderer) | Chip in `statusBar.right`; polls `/stats` every 3 s by default (Refresh every), skips while the window is hidden, re-polls at once when it becomes visible or on a connection/profile switch. A failed poll keeps the last figures, dimmed. |
+| `desktop/plugin.js` | Hermes Desktop (renderer) | Chip in `statusBar.right`; polls `/stats` every 3 s by default (Refresh every), times a gateway `ping` for RTT, skips while the window is hidden, re-polls at once when it becomes visible or on a connection/profile switch. A failed poll keeps the last figures, dimmed. |
 | `dashboard/plugin_api.py` | The Hermes backend you connect to | Read-only `GET /api/plugins/hermes-vitals-light/stats` via `psutil` (a Hermes core dependency), a loopback `GET /api/status` on the server it runs in, and one two-file `/proc` read for PSI/free RAM. Returns only load figures, the hostname, the session total, per-command process counts and the waited verdict. Both counts are cached and refreshed in the background, so a request never waits for them. |
 | `tui/hermes-vitals-light.mjs` | Hermes TUI (`<HERMES_HOME>/tui-widgets/`) | Ambient widget app `/vitals`; inlines `plugin_api.py` and runs it as a child (`python -c`) for the figures. |
 
@@ -161,7 +167,7 @@ added after these figures and was not measured separately: it adds one ask of th
 | PSI + free RAM read | two small `/proc` files; ~41 µs mean / ~38 µs median of CPU per call on the deployment host (p99 84 µs), no psutil, subprocess, thread or cache |
 | First process scan after start | runs in the background; ~5 s of one core on Windows (no request waits for it) |
 | TUI card child (`python -c`) | ~60 MB RSS (launcher + python); ~2 % of a core with processes on (scan cached 5 s), ~0.4 % off |
-| Desktop half | one ~260-byte request every 3 s, none while the window is hidden |
+| Desktop half | one ~260-byte request every 3 s, none while the window is hidden; RTT adds one gateway `ping` per poll while shown |
 
 ## Tests
 
@@ -193,6 +199,9 @@ match `src/` after `npm run build`.
   connection both show `offline`; a backend that is merely too slow shows `timeout`.
 - The lag warning is fixed at 1.5 s; it is not a setting. A healthy `/stats` answers well under
   100 ms, so this leaves room for a slow remote link while still flagging a struggling backend.
+- RTT is the Desktop↔gateway WebSocket path: it includes the app's own scheduling, and is left
+  out when the gateway socket is down or the host has no `host.request`. It is not an ICMP ping,
+  and it does not affect the health icon or the chip colour.
 - `waited` is Linux-only: it is omitted when `/proc/pressure/cpu` is unreadable (non-Linux, or a
   container without PSI). `free` is `MemAvailable`, one decimal GiB; the chip falls back to the
   old RAM percentage when `/proc/meminfo` is unreadable. The chip colour uses only the waited

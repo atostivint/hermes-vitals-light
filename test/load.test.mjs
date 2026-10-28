@@ -10,6 +10,7 @@ import {
   formatDuration,
   formatFree,
   formatPercent,
+  formatRtt,
   MAX_BACKOFF_MS,
   nextPollDelay,
   POLL_MS,
@@ -152,6 +153,19 @@ test('the chip shows free RAM and waited alongside the other figures', () => {
     }),
     'CPU 23% · Load 1.20 · 3.8G free · waited 15s/60'
   )
+})
+
+test('the chip shows the measured RTT, in milliseconds, and its switch hides it', () => {
+  const stats = { cpu_percent: 5, memory: { percent: 10 }, rtt_ms: 12.4 }
+  const shown = shownFigures({ rtt: false })
+
+  assert.equal(chipLabel(stats), 'CPU 5% · RAM 10% · RTT 12 ms')
+  assert.equal(chipLabel(stats, shown), 'CPU 5% · RAM 10%')
+  assert.equal(tooltipLines(stats).at(-1), 'RTT 12 ms')
+  assert.equal(formatRtt(0.4), '<1 ms')
+  assert.equal(formatRtt(undefined), '—')
+  // No gateway socket means no measurement: the chip simply leaves it out.
+  assert.equal(chipLabel({ cpu_percent: 5, memory: { percent: 10 } }), 'CPU 5% · RAM 10%')
 })
 
 test('a stale chip explains its age and why the figures stopped updating', () => {

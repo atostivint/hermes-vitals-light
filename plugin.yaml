@@ -1,4 +1,4 @@
-# hermes-vitals-light: CPU / RAM of the connected Hermes server in the Desktop status bar.
+# hermes-vitals-light: CPU / load / RAM / CPU pressure / RTT of the connected Hermes server in the Desktop status bar.
 # Backend half = dashboard/plugin_api.py (read-only route); Desktop half = desktop/plugin.js.
 name: hermes-vitals-light
 id: hermes-vitals-light
@@ -6,6 +6,6 @@ kind: standalone
 version: 0.1.0
 requires_hermes: ">=0.22"
 description: >
-  Shows the CPU and memory load of the server the Hermes Desktop is connected to
-  (local or remote gateway) as a chip in the Desktop status bar.
+  Shows the CPU, memory, load and CPU pressure of the server the Hermes Desktop is
+  connected to, plus the round-trip time to it, as a chip in the Desktop status bar.
 provides: []
