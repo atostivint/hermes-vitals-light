@@ -1,1 +1,13 @@
-{"api": "plugin_api.py", "description": "CPU and memory of the server the Desktop is connected to (read-only).", "icon": "Activity", "label": "Hermes Vitals Light", "name": "hermes-vitals-light", "tab": {"hidden": true, "path": "/vitals"}, "version": "0.1.0"}
+{
+  "name": "hermes-vitals-light",
+  "label": "Hermes Vitals Light",
+  "description": "CPU and memory of the server the Desktop is connected to (read-only).",
+  "icon": "Activity",
+  "version": "0.1.0",
+  "tab": {
+    "hidden": true,
+    "path": "/vitals"
+  },
+  "entry": "dist/index.js",
+  "api": "plugin_api.py"
+}

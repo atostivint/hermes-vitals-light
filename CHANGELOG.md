@@ -27,3 +27,9 @@ First public release.
 - **Backend route** `GET /api/plugins/hermes-vitals-light/stats`, read-only and
   fail-open, cached counts refreshed in the background, and a stateless
   `/proc` read for PSI and free RAM.
+- **Catalog metadata**: `requires_hermes: ">=0.22"` and a hidden `/vitals`
+  dashboard page, so the web dashboard has a bundle to load beside
+  `plugin_api.py` and the backend route mounts without a 404.
+- **Install and disclosure**: catalog install steps for the Desktop, backend
+  and TUI halves, plus a README section listing every file and network call
+  the plugin makes.
