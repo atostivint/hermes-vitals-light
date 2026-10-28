@@ -199,28 +199,28 @@ test('a timed-out attempt names its duration', () => {
 
 test('problem tooltips are two short lines, especially when offline', () => {
   assert.deepEqual(problemLines({ error: { kind: 'offline' }, status: 'unavailable' }), [
-    'Hermes offline',
-    'Reconnecting…'
+    'Hermes backend offline',
+    'Stopped or reconnecting.'
   ])
   assert.deepEqual(problemLines({ error: { kind: 'offline' }, status: 'stale', updatedAt: 1000 }, 13_000), [
-    'Hermes offline',
-    'Last reading 12 s ago'
+    'Hermes backend offline',
+    'Last reading 12 s ago · stopped or reconnecting'
   ])
   assert.deepEqual(problemLines({ error: { kind: 'missing' }, status: 'unavailable' }), [
-    'Plugin missing',
-    'Enable, restart'
+    'Backend plugin missing',
+    'Enable hermes-vitals-light, then restart.'
   ])
   assert.deepEqual(problemLines({ durationMs: 8000, error: { kind: 'timeout' }, status: 'unavailable' }), [
-    'Hermes timeout',
-    'No answer in 8.0 s'
+    'Hermes backend timed out',
+    'No answer after 8.0 s.'
   ])
   assert.deepEqual(problemLines({ error: { kind: 'timeout' }, status: 'stale', updatedAt: 10_000 }, 12_000), [
-    'Hermes timeout',
+    'Hermes backend timed out',
     'Last reading just now'
   ])
   assert.deepEqual(problemLines({ error: { kind: 'backend' }, status: 'stale', updatedAt: 10_000 }, 12_000), [
-    'Load unavailable',
-    'psutil missing'
+    'Cannot read system load',
+    'Last reading just now · psutil unavailable'
   ])
 })
 

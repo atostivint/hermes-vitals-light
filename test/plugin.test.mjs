@@ -281,7 +281,7 @@ test('a server without the backend half shows a dash and backs off', async () =>
 
   await plugin.fire()
 
-  assert.equal(text(plugin.chip().props.children), 'CPU — · plugin')
+  assert.equal(text(plugin.chip().props.children), 'CPU —')
   assert.ok(plugin.timers.at(-1).ms > 3000)
   plugin.dispose()
 })
@@ -302,10 +302,10 @@ test('a failed poll keeps the last figures, dimmed, with their age and the reaso
   await plugin.fire()
 
   const chip = plugin.chip()
-  assert.equal(text(chip.props.children), 'CPU 23% · Load 1.50 · 4.0G free · waited 15s/60 · timeout')
+  assert.equal(text(chip.props.children), 'CPU 23% · Load 1.50 · 4.0G free · waited 15s/60')
   assert.equal(chip.props.children.props.children[0].props.name, 'clock')
   assert.equal(chip.props.children.props.children[1].props.style.opacity, 0.55)
-  assert.match(text(chip.props.label), /Hermes timeout/)
+  assert.match(text(chip.props.label), /Hermes backend timed out/)
   assert.match(text(chip.props.label), /Last reading just now/)
   plugin.dispose()
 })
@@ -318,10 +318,10 @@ test('a first-poll timeout explains itself instead of claiming the plugin is mis
   await plugin.fire()
 
   const chip = plugin.chip()
-  assert.equal(text(chip.props.children), 'CPU — · timeout')
+  assert.equal(text(chip.props.children), 'CPU —')
   assert.equal(chip.props.children.props.children[0].props.name, 'clock')
-  assert.match(text(chip.props.label), /Hermes timeout/)
-  assert.match(text(chip.props.label), /No answer/)
+  assert.match(text(chip.props.label), /Hermes backend timed out/)
+  assert.match(text(chip.props.label), /No answer from the server/)
   assert.doesNotMatch(text(chip.props.label), /enable hermes-vitals-light/)
   plugin.dispose()
 })
@@ -334,12 +334,12 @@ test('a stopped backend is explicit, even on a cold start', async () => {
   await plugin.fire()
 
   const chip = plugin.chip()
-  assert.equal(text(chip.props.children), 'CPU — · offline')
+  assert.equal(text(chip.props.children), 'CPU —')
   assert.equal(chip.props.children.props.children[0].props.name, 'debug-disconnect')
   assert.equal(chip.props.children.props.children[0].props.style.color, '#ef4444')
   assert.match(chip.props.label.props.className, /max-w-64/)
-  assert.match(text(chip.props.label), /Hermes offline/)
-  assert.match(text(chip.props.label), /Reconnecting/)
+  assert.match(text(chip.props.label), /Hermes backend offline/)
+  assert.match(text(chip.props.label), /Stopped or reconnecting/)
   plugin.dispose()
 })
 
@@ -355,13 +355,13 @@ test('a dead SSH tunnel and a 502 both read as offline, not as lag', async () =>
     await plugin.fire()
 
     const chip = plugin.chip()
-    assert.equal(text(chip.props.children), 'CPU — · offline')
+    assert.equal(text(chip.props.children), 'CPU —')
     assert.equal(chip.props.children.props.children[0].props.name, 'debug-disconnect')
     plugin.dispose()
   }
 })
 
-test('a stopped backend keeps the last figures with an offline note', async () => {
+test('a stopped backend keeps the last figures without a badge note', async () => {
   let calls = 0
   const plugin = load(async () => {
     calls++
@@ -377,15 +377,16 @@ test('a stopped backend keeps the last figures with an offline note', async () =
   await plugin.fire()
 
   const chip = plugin.chip()
-  assert.equal(text(chip.props.children), 'CPU 23% · Load 1.50 · 4.0G free · waited 15s/60 · offline')
+  assert.equal(text(chip.props.children), 'CPU 23% · Load 1.50 · 4.0G free · waited 15s/60')
   assert.equal(chip.props.children.props.children[0].props.name, 'debug-disconnect')
   assert.equal(chip.props.children.props.children[1].props.style.opacity, 0.55)
-  assert.match(text(chip.props.label), /Hermes offline/)
+  assert.match(text(chip.props.label), /Hermes backend offline/)
   assert.match(text(chip.props.label), /Last reading just now/)
+  assert.match(text(chip.props.label), /stopped or reconnecting/)
   plugin.dispose()
 })
 
-test('a slow successful poll shows a watch icon and its duration', async () => {
+test('a slow successful poll shows a watch icon and keeps the badge short', async () => {
   const realNow = Date.now
   let now = 1_000_000
   let plugin
@@ -404,7 +405,7 @@ test('a slow successful poll shows a watch icon and its duration', async () => {
     const chip = plugin.chip()
     assert.equal(chip.props.children.props.children[0].props.name, 'watch')
     assert.equal(chip.props.children.props.children[0].props.style.color, '#f59e0b')
-    assert.match(text(chip.props.children), /2\.5 s$/)
+    assert.doesNotMatch(text(chip.props.children), /2\.5 s/)
     assert.match(text(chip.props.label), /Hermes is slow: the last poll took 2\.5 s/)
   } finally {
     plugin?.dispose()
@@ -420,10 +421,10 @@ test('a 404 still names the missing backend half', async () => {
   await plugin.fire()
 
   const chip = plugin.chip()
-  assert.equal(text(chip.props.children), 'CPU — · plugin')
+  assert.equal(text(chip.props.children), 'CPU —')
   assert.equal(chip.props.children.props.children[0].props.name, 'plug')
-  assert.match(text(chip.props.label), /Plugin missing/)
-  assert.match(text(chip.props.label), /Enable, restart/)
+  assert.match(text(chip.props.label), /Backend plugin missing/)
+  assert.match(text(chip.props.label), /Enable hermes-vitals-light/)
   plugin.dispose()
 })
 
