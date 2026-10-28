@@ -28,7 +28,7 @@ import { spawn } from 'node:child_process'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { CHIP_FIGURES, chipLabel, DEFAULT_INTERVAL, INTERVALS, levelOf, shownPercents, skippedFigures, tooltipLines } from './load.js'
+import { CHIP_FIGURES, chipLabel, DEFAULT_INTERVAL, INTERVALS, skippedFigures, tooltipLines, waitedVerdict } from './load.js'
 import { applyOptions, describeOptions, OPTIONS, tuiOptions } from './options.js'
 
 // dashboard/plugin_api.py, inlined by scripts/build.mjs.
@@ -96,7 +96,7 @@ export function startFeed(onStats, spawnFn = spawn, skip = '', interval = DEFAUL
 }
 
 // Widest each figure gets ("CPU 100%", "Load 12.34"…), so the card never resizes while ticking.
-const FIGURE_WIDTH = { clients: 5, cpu: 8, load: 10, processes: 5, ram: 8 }
+const FIGURE_WIDTH = { clients: 5, cpu: 8, load: 10, processes: 5, ram: 8, waited: 13 }
 
 export function cardWidth(options) {
   const figures = CHIP_FIGURES.filter(({ id }) => options[id]).map(({ id }) => FIGURE_WIDTH[id])
@@ -138,8 +138,8 @@ export default function register(sdk) {
       )
     } else {
       const { stats } = feed
-      const level = levelOf(...shownPercents(stats, options))
-      const color = { critical: t.color.error, normal: t.color.text, warning: t.color.warn }[level]
+      const level = waitedVerdict(stats)
+      const color = { busy: t.color.warn, ok: t.color.text, stuck: t.color.error }[level]
 
       // Every figure off still names the box, so the card is never empty.
       lines.push(h(Text, { color, key: 'chip', wrap: 'truncate-end' }, chipLabel(stats, options) || stats.hostname))

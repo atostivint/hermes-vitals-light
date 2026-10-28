@@ -10,7 +10,7 @@ import { pathToFileURL } from 'node:url'
 
 import { applyOptions, describeOptions, TUI_DEFAULTS, tuiOptions } from '../src/options.js'
 
-const ALL_OFF = { cpu: false, detail: false, interval: 3, load: false, processes: false, ram: false }
+const ALL_OFF = { cpu: false, detail: false, interval: 3, load: false, processes: false, ram: false, waited: false }
 
 test('on/off set an option, a bare option flips it, several go in one command', () => {
   assert.equal(applyOptions('ram off', TUI_DEFAULTS).ram, false)
@@ -51,7 +51,10 @@ test('every sets the refresh period, only to an offered one', () => {
 test('saved options sit over the defaults; junk is ignored', () => {
   assert.deepEqual(tuiOptions(undefined), TUI_DEFAULTS)
   assert.deepEqual(tuiOptions({ cpu: false, detail: 'yes', extra: true }), { ...TUI_DEFAULTS, cpu: false })
-  assert.equal(describeOptions(TUI_DEFAULTS), 'cpu on · load on · ram on · processes on · detail off · every 3s')
+  assert.equal(
+    describeOptions(TUI_DEFAULTS),
+    'cpu on · load on · ram on · waited on · processes on · detail off · every 3s'
+  )
 })
 
 test('the card has no session count: it has no server to ask, and a saved one is ignored', () => {
@@ -93,14 +96,17 @@ test('a refused command prints the usage with the current options', () => {
   app.init('cpu off')
 
   assert.equal(app.init('help'), null)
-  assert.match(app.usage, /^usage: \/vitals \[cpu\|load\|ram\|processes\|detail\|all \[on\|off\]\] \[every [\d|]+\] \[reset\]/)
+  assert.match(
+    app.usage,
+    /^usage: \/vitals \[cpu\|load\|ram\|waited\|processes\|detail\|all \[on\|off\]\] \[every [\d|]+\] \[reset\]/
+  )
   assert.match(app.usage, /now: cpu off · load on/)
 
   app.init('reset')
 })
 
 test('the card is as wide as its widest figures, so it never resizes', () => {
-  assert.equal(widget.cardWidth(TUI_DEFAULTS), 8 + 10 + 8 + 5 + 3 * 3 + 4)
+  assert.equal(widget.cardWidth(TUI_DEFAULTS), 8 + 10 + 8 + 13 + 5 + 3 * 4 + 4)
   assert.equal(widget.cardWidth({ ...ALL_OFF, ram: true }), 24)
   assert.equal(widget.cardWidth({ ...ALL_OFF, detail: true }), 46)
 })

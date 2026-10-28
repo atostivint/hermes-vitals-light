@@ -25,7 +25,31 @@ function atom(value) {
 const connectionId = atom('local')
 const profile = atom('default')
 
-globalThis.document = { hidden: false }
+const visibilityListeners = new Set()
+
+globalThis.document = {
+  addEventListener: (type, fn) => {
+    if (type === 'visibilitychange') {
+      visibilityListeners.add(fn)
+    }
+  },
+  hidden: false,
+  removeEventListener: (type, fn) => {
+    if (type === 'visibilitychange') {
+      visibilityListeners.delete(fn)
+    }
+  }
+}
+
+function setHidden(hidden) {
+  globalThis.document.hidden = hidden
+}
+
+function fireVisibility() {
+  for (const fn of [...visibilityListeners]) {
+    fn()
+  }
+}
 
 globalThis.__stubs = {
   atom,
@@ -132,10 +156,12 @@ function text(node) {
 const STATS = {
   cpu_count: 4,
   cpu_percent: 23.4,
+  free: 4 * 1024 ** 3,
   hostname: 'gw-1',
   load_avg: [1.5, 1, 0.5],
   memory: { percent: 92, total: 8 * 1024 ** 3, used: 7 * 1024 ** 3 },
-  ok: true
+  ok: true,
+  waited: { seconds: 15, verdict: 'busy' }
 }
 
 test('one chip lands in the right status bar and shows nothing before the first reply', () => {
@@ -147,7 +173,7 @@ test('one chip lands in the right status bar and shows nothing before the first 
   plugin.dispose()
 })
 
-test('a reply from /stats paints CPU and RAM, coloured by the worst figure', async () => {
+test('a reply from /stats paints every figure, coloured by the waited verdict', async () => {
   const paths = []
   const plugin = load(async path => {
     paths.push(path)
@@ -159,13 +185,14 @@ test('a reply from /stats paints CPU and RAM, coloured by the worst figure', asy
 
   const chip = plugin.chip()
   assert.deepEqual(paths, ['/stats'])
-  assert.equal(text(chip.props.children), 'CPU 23% · Load 1.50 · RAM 92%')
-  assert.equal(chip.props.children.props.style.color, '#ef4444')
+  assert.equal(text(chip.props.children), 'CPU 23% · Load 1.50 · 4.0G free · waited 15s/60')
+  assert.equal(chip.props.children.props.style.color, '#f59e0b')
   assert.match(text(chip.props.label), /gw-1/)
+  assert.match(text(chip.props.label), /Waited on CPU: 15s\/60 \(busy\)/)
   plugin.dispose()
 })
 
-test('each figure has a switch in Settings, saved, and a hidden one stops colouring the chip', async () => {
+test('each figure has a switch in Settings, saved; hiding one keeps the verdict colour', async () => {
   const plugin = load(async () => STATS)
 
   await plugin.fire()
@@ -174,17 +201,24 @@ test('each figure has a switch in Settings, saved, and a hidden one stops colour
   assert.equal(plugin.pages[0].title, 'Hermes Vitals Light')
   assert.deepEqual(
     rows.map(row => row.props.label),
-    ['CPU', 'Load average', 'RAM', 'Active sessions', 'Hermes processes']
+    ['CPU', 'Load average', 'RAM', 'Waited on CPU', 'Active sessions', 'Hermes processes']
   )
   assert.ok(rows.every(row => row.props.checked))
 
   rows.find(row => row.props.label === 'RAM').props.onChange(false)
 
   const chip = plugin.chip()
-  assert.equal(text(chip.props.children), 'CPU 23% · Load 1.50')
-  assert.equal(chip.props.children.props.style.color, undefined, 'RAM at 92% no longer turns it red')
+  assert.equal(text(chip.props.children), 'CPU 23% · Load 1.50 · waited 15s/60')
+  assert.equal(chip.props.children.props.style.color, '#f59e0b', 'the RAM figure no longer decides the colour')
   assert.equal(plugin.toggles().find(row => row.props.label === 'RAM').props.checked, false)
-  assert.deepEqual(plugin.saved.chip, { clients: true, cpu: true, load: true, processes: true, ram: false })
+  assert.deepEqual(plugin.saved.chip, {
+    clients: true,
+    cpu: true,
+    load: true,
+    processes: true,
+    ram: false,
+    waited: true
+  })
   plugin.dispose()
 })
 
@@ -210,7 +244,7 @@ test('counts switched off are skipped on the server from the next poll', async (
 
 test('saved settings come back on load, and every figure off leaves the icon', async () => {
   const plugin = load(async () => STATS, {
-    chip: { clients: false, cpu: false, load: false, processes: false, ram: false }
+    chip: { clients: false, cpu: false, load: false, processes: false, ram: false, waited: false }
   })
 
   await plugin.fire()
@@ -247,8 +281,200 @@ test('a server without the backend half shows a dash and backs off', async () =>
 
   await plugin.fire()
 
-  assert.equal(text(plugin.chip().props.children), 'CPU —')
+  assert.equal(text(plugin.chip().props.children), 'CPU — · plugin')
   assert.ok(plugin.timers.at(-1).ms > 3000)
+  plugin.dispose()
+})
+
+test('a failed poll keeps the last figures, dimmed, with their age and the reason', async () => {
+  let calls = 0
+  const plugin = load(async () => {
+    calls++
+
+    if (calls === 1) {
+      return STATS
+    }
+
+    throw new Error('Timed out connecting to Hermes backend after 8000ms')
+  })
+
+  await plugin.fire()
+  await plugin.fire()
+
+  const chip = plugin.chip()
+  assert.equal(text(chip.props.children), 'CPU 23% · Load 1.50 · 4.0G free · waited 15s/60 · timeout')
+  assert.equal(chip.props.children.props.children[0].props.name, 'clock')
+  assert.equal(chip.props.children.props.children[1].props.style.opacity, 0.55)
+  assert.match(text(chip.props.label), /Hermes backend timed out/)
+  assert.match(text(chip.props.label), /Last reading just now/)
+  plugin.dispose()
+})
+
+test('a first-poll timeout explains itself instead of claiming the plugin is missing', async () => {
+  const plugin = load(async () => {
+    throw new Error('Timed out connecting to Hermes backend after 8000ms')
+  })
+
+  await plugin.fire()
+
+  const chip = plugin.chip()
+  assert.equal(text(chip.props.children), 'CPU — · timeout')
+  assert.equal(chip.props.children.props.children[0].props.name, 'clock')
+  assert.match(text(chip.props.label), /Hermes backend timed out/)
+  assert.match(text(chip.props.label), /No answer from the server/)
+  assert.doesNotMatch(text(chip.props.label), /enable hermes-vitals-light/)
+  plugin.dispose()
+})
+
+test('a stopped backend is explicit, even on a cold start', async () => {
+  const plugin = load(async () => {
+    throw new Error('No connection with id "iris"')
+  })
+
+  await plugin.fire()
+
+  const chip = plugin.chip()
+  assert.equal(text(chip.props.children), 'CPU — · offline')
+  assert.equal(chip.props.children.props.children[0].props.name, 'debug-disconnect')
+  assert.equal(chip.props.children.props.children[0].props.style.color, '#ef4444')
+  assert.match(chip.props.label.props.className, /max-w-64/)
+  assert.match(text(chip.props.label), /Hermes backend offline/)
+  assert.match(text(chip.props.label), /Stopped or reconnecting/)
+  plugin.dispose()
+})
+
+test('a dead SSH tunnel and a 502 both read as offline, not as lag', async () => {
+  for (const error of [
+    new Error('SSH operation to hermes-agent@oracle timed out. The connection may be half-open; reconnecting.'),
+    Object.assign(new Error('Bad Gateway'), { status: 502 })
+  ]) {
+    const plugin = load(async () => {
+      throw error
+    })
+
+    await plugin.fire()
+
+    const chip = plugin.chip()
+    assert.equal(text(chip.props.children), 'CPU — · offline')
+    assert.equal(chip.props.children.props.children[0].props.name, 'debug-disconnect')
+    plugin.dispose()
+  }
+})
+
+test('a stopped backend keeps the last figures with an offline note', async () => {
+  let calls = 0
+  const plugin = load(async () => {
+    calls++
+
+    if (calls === 1) {
+      return STATS
+    }
+
+    throw new Error('read ECONNRESET')
+  })
+
+  await plugin.fire()
+  await plugin.fire()
+
+  const chip = plugin.chip()
+  assert.equal(text(chip.props.children), 'CPU 23% · Load 1.50 · 4.0G free · waited 15s/60 · offline')
+  assert.equal(chip.props.children.props.children[0].props.name, 'debug-disconnect')
+  assert.equal(chip.props.children.props.children[1].props.style.opacity, 0.55)
+  assert.match(text(chip.props.label), /Hermes backend offline/)
+  assert.match(text(chip.props.label), /Last reading just now/)
+  assert.match(text(chip.props.label), /stopped or reconnecting/)
+  plugin.dispose()
+})
+
+test('a slow successful poll shows a watch icon and its duration', async () => {
+  const realNow = Date.now
+  let now = 1_000_000
+  let plugin
+
+  Date.now = () => now
+
+  try {
+    plugin = load(async () => {
+      now += 2500
+
+      return STATS
+    })
+
+    await plugin.fire()
+
+    const chip = plugin.chip()
+    assert.equal(chip.props.children.props.children[0].props.name, 'watch')
+    assert.equal(chip.props.children.props.children[0].props.style.color, '#f59e0b')
+    assert.match(text(chip.props.children), /2\.5 s$/)
+    assert.match(text(chip.props.label), /Hermes is slow: the last poll took 2\.5 s/)
+  } finally {
+    plugin?.dispose()
+    Date.now = realNow
+  }
+})
+
+test('a 404 still names the missing backend half', async () => {
+  const plugin = load(async () => {
+    throw Object.assign(new Error('404'), { status: 404 })
+  })
+
+  await plugin.fire()
+
+  const chip = plugin.chip()
+  assert.equal(text(chip.props.children), 'CPU — · plugin')
+  assert.equal(chip.props.children.props.children[0].props.name, 'plug')
+  assert.match(text(chip.props.label), /Backend plugin missing/)
+  assert.match(text(chip.props.label), /Enable hermes-vitals-light/)
+  plugin.dispose()
+})
+
+test('coming back into view polls at once and keeps the figures', async () => {
+  let calls = 0
+  const plugin = load(async () => {
+    calls++
+
+    return calls === 1 ? STATS : { ...STATS, cpu_percent: 90 }
+  })
+
+  await plugin.fire()
+  setHidden(true)
+  await plugin.fire()
+  assert.equal(calls, 1, 'no request while the window is hidden')
+
+  setHidden(false)
+  fireVisibility()
+  await plugin.fire()
+
+  const chip = plugin.chip()
+  assert.equal(calls, 2)
+  assert.match(text(chip.props.children), /CPU 90%/)
+  assert.equal(chip.props.children.props.children[1].props.style, undefined)
+  plugin.dispose()
+})
+
+test('the backoff reaches 30 s and a success restores the normal cadence', async () => {
+  let down = true
+  const plugin = load(async () => {
+    if (down) {
+      throw new Error('Timed out connecting to Hermes backend after 8000ms')
+    }
+
+    return STATS
+  })
+
+  for (let i = 0; i < 4; i++) {
+    await plugin.fire()
+  }
+
+  assert.equal(plugin.timers.filter(t => t.live).at(-1).ms, 30_000)
+
+  down = false
+  await plugin.fire()
+
+  const chip = plugin.chip()
+  assert.equal(plugin.timers.filter(t => t.live).at(-1).ms, 3000)
+  assert.equal(chip.props.children.props.children[1].props.style, undefined)
+  assert.match(text(chip.props.children), /CPU 23%/)
   plugin.dispose()
 })
 

@@ -21,14 +21,80 @@ import { atom, Codicon, host, STATUSBAR_AREAS, Tip, ToggleRow, useValue } from '
 import { jsx, jsxs } from 'react/jsx-runtime'
 import { useSyncExternalStore } from 'react'
 
-const LEVEL_COLOR = { critical: '#ef4444', normal: undefined, warning: '#f59e0b' }
+const VERDICT_COLOR = { busy: '#f59e0b', ok: undefined, stuck: '#ef4444' }
 
 const LOADING = { status: 'loading' }
+
+// What went wrong, for the tooltip. A 404 is permanent until the backend is
+// changed; a timeout is usually the whole box being busy, not this plugin.
+function errorKind(error) {
+  const status = Number(error?.status ?? error?.statusCode ?? error?.response?.status)
+
+  if (status === 401 || status === 403 || status === 404) {
+    return 'missing'
+  }
+
+  if (status === 502 || status === 503 || status === 504) {
+    return 'offline'
+  }
+
+  if (status >= 500 && status < 600) {
+    return 'server'
+  }
+
+  const message = String(error?.message ?? error ?? '')
+
+  if (/\b40[134]\b/.test(message)) {
+    return 'missing'
+  }
+
+  // An SSH tunnel that died, a refused connection or a connection id the
+  // Desktop dropped: the installation is stopped or reconnecting, not slow.
+  if (
+    /no connection|econnrefused|econnreset|ehostunreach|enetunreach|enotfound|eai_again|socket hang up|network error|fetch failed|failed to fetch|connection refused|connection closed|not connected|offline|ssh operation|half-open|reconnecting/i.test(
+      message
+    )
+  ) {
+    return 'offline'
+  }
+
+  return /timeout|timed out|abort|ETIMEDOUT/i.test(message) ? 'timeout' : 'network'
+}
+
+// The first icon of the chip doubles as its health light: pulse normally, a
+// watch when Hermes is slow, a clock on timeout, a severed link when the
+// backend is stopped/unreachable, a plug when the backend half is missing.
+const WARNING_COLOR = '#f59e0b'
+const OFFLINE_COLOR = '#ef4444'
+
+function chipIcon(state) {
+  if (state.status === 'unavailable' || state.status === 'stale') {
+    if (state.error?.kind === 'missing') {
+      return { color: WARNING_COLOR, name: 'plug' }
+    }
+
+    if (state.error?.kind === 'offline' || state.error?.kind === 'network') {
+      return { color: OFFLINE_COLOR, name: 'debug-disconnect' }
+    }
+
+    if (state.error?.kind === 'timeout') {
+      return { color: WARNING_COLOR, name: 'clock' }
+    }
+
+    return { color: WARNING_COLOR, name: 'warning' }
+  }
+
+  if (Number.isFinite(state.durationMs) && state.durationMs >= SLOW_REQUEST_MS) {
+    return { color: WARNING_COLOR, name: 'watch' }
+  }
+
+  return { name: 'pulse' }
+}
 
 // `prefs`: the counts switched off are not measured on the server either (`?skip=`).
 // `interval`: the refresh period in seconds, read at every reschedule so a change applies at once.
 function createLoadStore(ctx, prefs, interval) {
-  const pollMs = () => interval.get() * 1000
+  const pollMs = () => Math.max(500, interval.get() * 1000)
   const listeners = new Set()
   let state = LOADING
   let failures = 0
@@ -47,17 +113,29 @@ function createLoadStore(ctx, prefs, interval) {
     cancelTimer = ctx.setTimeout(poll, ms)
   }
 
+  // A failed poll keeps the last figures: a timeout must not erase a reading
+  // that was valid a moment ago. Only a cold start shows `CPU —`.
+  const failed = (error, durationMs) => {
+    if (state.stats) {
+      set({ ...state, durationMs, error, status: 'stale' })
+    } else {
+      set({ durationMs, error, status: 'unavailable' })
+    }
+  }
+
   async function poll() {
-    if (document.hidden) {
+    if (typeof document !== 'undefined' && document.hidden) {
       schedule(pollMs())
 
       return
     }
 
     const mine = generation
+    const startedAt = Date.now()
 
     try {
-      const stats = await ctx.rest(statsPath(prefs.get()), { timeoutMs: 5000 })
+      const stats = await ctx.rest(statsPath(prefs.get()), { timeoutMs: REQUEST_TIMEOUT_MS })
+      const durationMs = Date.now() - startedAt
 
       if (mine !== generation) {
         return
@@ -65,27 +143,33 @@ function createLoadStore(ctx, prefs, interval) {
 
       if (stats?.ok) {
         failures = 0
-        set({ stats, status: 'ok' })
+        set({ durationMs, stats, status: 'ok', updatedAt: Date.now() })
       } else {
         failures++
-        set({ status: 'unavailable' })
+        failed({ kind: 'backend' }, durationMs)
       }
-    } catch {
+    } catch (error) {
       if (mine !== generation) {
         return
       }
 
       failures++
-      set({ status: 'unavailable' })
+      failed({ kind: errorKind(error), message: String(error?.message ?? error ?? '') }, Date.now() - startedAt)
     }
 
     schedule(nextPollDelay(failures, pollMs()))
   }
 
-  const restart = () => {
+  // `clear`: a new route means the old server's figures must not be shown;
+  // coming back to a visible window keeps them while the fresh poll runs.
+  const restart = (clear = true) => {
     generation++
     failures = 0
-    set(LOADING)
+
+    if (clear) {
+      set(LOADING)
+    }
+
     schedule(0)
   }
 
@@ -108,6 +192,20 @@ function createLoadStore(ctx, prefs, interval) {
       }
     })
   )
+
+  // A window that comes back into view should not wait for the old timer
+  // (which may be a long backoff after a failure).
+  const onVisibility = () => {
+    if (started && !document.hidden) {
+      restart(false)
+    }
+  }
+
+  if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+    document.addEventListener('visibilitychange', onVisibility)
+    ctx.onDispose(() => document.removeEventListener('visibilitychange', onVisibility))
+  }
+
   ctx.onDispose(() => cancelTimer())
   started = true
   restart()
@@ -123,7 +221,21 @@ function createLoadStore(ctx, prefs, interval) {
 }
 
 const CHIP_CLASS =
-  'inline-flex h-full items-center gap-1 px-1.5 text-[0.6875rem] tabular-nums text-(--ui-text-tertiary)'
+  'inline-flex h-full shrink-0 items-center gap-1 whitespace-nowrap px-1.5 text-[0.6875rem] tabular-nums text-(--ui-text-tertiary)'
+
+// Error/offline tooltips are deliberately compact: a title and one reason.
+// The last figures are still on the chip; the full detail is for healthy polls.
+function problemTip(state) {
+  const [title, detail] = problemLines(state)
+
+  return jsx('div', {
+    className: 'flex max-w-64 flex-col gap-0.5 leading-[1.35]',
+    children: [
+      jsx('div', { className: 'font-medium', children: title }),
+      jsx('div', { className: 'font-normal opacity-80', children: detail })
+    ]
+  })
+}
 
 function LoadChip({ prefs, store }) {
   const state = useSyncExternalStore(store.subscribe, store.get)
@@ -133,29 +245,46 @@ function LoadChip({ prefs, store }) {
     return null
   }
 
+  const icon = chipIcon(state)
+  const iconNode = jsx(Codicon, {
+    name: icon.name,
+    size: '0.7rem',
+    style: icon.color ? { color: icon.color } : undefined
+  })
+
   if (state.status === 'unavailable') {
+    // The note makes a stopped backend or a timeout visible without hovering.
+    const label = ['CPU —', stateNote(state)].filter(Boolean).join(' · ')
+
     return jsx(Tip, {
-      label: 'Hermes Vitals Light unavailable: enable the hermes-vitals-light plugin on this server, then restart its backend.',
+      label: problemTip(state),
       children: jsxs('span', {
         className: CHIP_CLASS,
-        children: [jsx(Codicon, { name: 'pulse', size: '0.7rem' }), jsx('span', { children: 'CPU —' })]
+        children: [iconNode, jsx('span', { children: label })]
       })
     })
   }
 
   const { stats } = state
+  const stale = state.status === 'stale'
   // Every figure switched off still leaves the icon, so the tooltip stays reachable.
-  const label = chipLabel(stats, shown)
+  const base = chipLabel(stats, shown)
+  const label = [base, stateNote(state)].filter(Boolean).join(' · ')
+  const detail = stale
+    ? problemTip(state)
+    : jsx('div', {
+        className: 'flex flex-col gap-0.5 tabular-nums',
+        children: [...statusLines(state), ...tooltipLines(stats)].map((line, index) =>
+          jsx('div', { children: line }, `${index}:${line}`)
+        )
+      })
 
   return jsx(Tip, {
-    label: jsx('div', {
-      className: 'flex flex-col gap-0.5 tabular-nums',
-      children: tooltipLines(stats).map(line => jsx('div', { children: line }, line))
-    }),
+    label: detail,
     children: jsxs('span', {
       className: CHIP_CLASS,
-      style: { color: LEVEL_COLOR[levelOf(...shownPercents(stats, shown))] },
-      children: [jsx(Codicon, { name: 'pulse', size: '0.7rem' }), label ? jsx('span', { children: label }) : null]
+      style: { color: VERDICT_COLOR[waitedVerdict(stats)] },
+      children: [iconNode, label ? jsx('span', { style: stale ? { opacity: 0.55 } : undefined, children: label }) : null]
     })
   })
 }
@@ -243,7 +372,13 @@ export default {
 // Kept DOM- and SDK-free so the tests import it directly.
 
 const POLL_MS = 3000
-const MAX_BACKOFF_MS = 60_000
+const MAX_BACKOFF_MS = 30_000
+// A slow backend is still worth waiting for once; the chip shows the last
+// reading meanwhile, so a generous timeout costs no freshness.
+const REQUEST_TIMEOUT_MS = 8000
+// A healthy /stats answers in well under 100 ms; any second spent waiting is
+// the connection or the backend struggling, not the figures themselves.
+const SLOW_REQUEST_MS = 1500
 
 // The refresh periods the settings offer, in seconds; the default is the 3 s cadence.
 const INTERVALS = [1, 3, 5, 10, 30, 60]
@@ -276,6 +411,43 @@ function formatPercent(percent) {
   return Number.isFinite(percent) ? `${Math.round(percent)}%` : '—'
 }
 
+// MemAvailable in GiB, exactly as the chip shows it: "3.8G free".
+function formatFree(bytes) {
+  if (!Number.isFinite(bytes) || bytes < 0) {
+    return '?'
+  }
+
+  return `${(bytes / 1024 ** 3).toFixed(1)}G free`
+}
+
+// Linux PSI CPU pressure: round(avg60 * 0.6) seconds of the last minute waited on CPU.
+function waitedLabel(stats) {
+  const seconds = stats.waited?.seconds
+
+  return Number.isFinite(seconds) ? `waited ${Math.round(seconds)}s/60` : ''
+}
+
+const WAITED_STUCK_SECONDS = 25
+const WAITED_BUSY_SECONDS = 10
+const LOW_FREE_BYTES = 1024 * 1024 ** 2
+
+function waitedVerdict(stats) {
+  const verdict = stats.waited?.verdict
+
+  if (verdict === 'stuck' || verdict === 'busy' || verdict === 'ok') {
+    return verdict
+  }
+
+  const seconds = stats.waited?.seconds
+  const free = stats.free
+
+  if ((Number.isFinite(seconds) && seconds >= WAITED_STUCK_SECONDS) || (Number.isFinite(free) && free < LOW_FREE_BYTES)) {
+    return 'stuck'
+  }
+
+  return Number.isFinite(seconds) && seconds >= WAITED_BUSY_SECONDS ? 'busy' : 'ok'
+}
+
 // 1-minute load per core, as a percent: a load of 4 on 4 cores is a saturated box.
 function loadPercent(stats) {
   const load1 = stats.load_avg?.[0]
@@ -288,7 +460,12 @@ function loadPercent(stats) {
 const CHIP_FIGURES = [
   { description: 'CPU use since the previous poll.', id: 'cpu', label: 'CPU' },
   { description: '1-minute load average (servers that report one).', id: 'load', label: 'Load average' },
-  { description: 'Memory in use.', id: 'ram', label: 'RAM' },
+  { description: 'Free memory (Linux MemAvailable).', id: 'ram', label: 'RAM' },
+  {
+    description: 'Seconds in the last minute at least one task waited for CPU (Linux PSI).',
+    id: 'waited',
+    label: 'Waited on CPU'
+  },
   {
     description: '👥 sessions active in the last 5 minutes on the connected server (Hermes status).',
     id: 'clients',
@@ -339,7 +516,14 @@ function chipLabel(stats, shown = ALL_SHOWN) {
   }
 
   if (shown.ram) {
-    parts.push(`RAM ${formatPercent(stats.memory?.percent)}`)
+    parts.push(Number.isFinite(stats.free) ? formatFree(stats.free) : `RAM ${formatPercent(stats.memory?.percent)}`)
+  }
+
+  if (shown.waited) {
+    const waited = waitedLabel(stats)
+    if (waited) {
+      parts.push(waited)
+    }
   }
 
   // An older backend half sends no `clients`: keep the chip as it was.
@@ -377,6 +561,175 @@ function nextPollDelay(failures, baseMs = POLL_MS) {
   return failures === 0 ? baseMs : Math.min(baseMs * 2 ** failures, Math.max(MAX_BACKOFF_MS, baseMs))
 }
 
+const ERROR_TEXT = {
+  backend: "The backend half could not read this machine's load (psutil unavailable).",
+  missing: 'The backend half is not answering: enable hermes-vitals-light on this server, then restart its backend.',
+  network: 'The Hermes backend is unreachable.',
+  offline: 'The Hermes backend is unreachable (stopped or reconnecting).',
+  server: 'The Hermes backend answered with an error.',
+  timeout: 'The Hermes backend did not answer in time.'
+}
+
+function errorText(kind, showingLast = false) {
+  const text = ERROR_TEXT[kind] ?? ERROR_TEXT.network
+
+  return showingLast ? `${text} Showing the last reading.` : text
+}
+
+// Short, stable age labels for the tooltip: "just now", "12 s", "3 min", "2 h".
+function formatAge(ms) {
+  if (!Number.isFinite(ms) || ms < 5000) {
+    return 'just now'
+  }
+
+  if (ms < 60_000) {
+    return `${Math.max(1, Math.round(ms / 1000))} s`
+  }
+
+  if (ms < 3_600_000) {
+    return `${Math.max(1, Math.round(ms / 60_000))} min`
+  }
+
+  return `${Math.max(1, Math.round(ms / 3_600_000))} h`
+}
+
+// A poll duration for the chip and tooltip: "420 ms", "2.5 s", "12 s".
+function formatDuration(ms) {
+  if (!Number.isFinite(ms) || ms < 0) {
+    return '?'
+  }
+
+  if (ms < 1000) {
+    return `${Math.round(ms)} ms`
+  }
+
+  const seconds = ms / 1000
+
+  return `${seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)} s`
+}
+
+// The short text appended to the chip only when something needs attention:
+// a slow poll duration, "offline" or "timeout". Empty in normal operation.
+function stateNote(state) {
+  if (state.status === 'ok' && Number.isFinite(state.durationMs) && state.durationMs >= SLOW_REQUEST_MS) {
+    return formatDuration(state.durationMs)
+  }
+
+  if (state.status === 'stale' || state.status === 'unavailable') {
+    if (state.error?.kind === 'offline' || state.error?.kind === 'network') {
+      return 'offline'
+    }
+
+    if (state.error?.kind === 'timeout') {
+      return 'timeout'
+    }
+
+    if (state.error?.kind === 'missing') {
+      return 'plugin'
+    }
+
+    if (state.error?.kind) {
+      return 'error'
+    }
+  }
+
+  return ''
+}
+
+// The tooltip lines that explain why the figures are old, or why there are none.
+function statusLines(state, now = Date.now()) {
+  const lines = []
+
+  if (state.status === 'stale') {
+    const age = formatAge(now - state.updatedAt)
+
+    lines.push(age === 'just now' ? 'Last update: just now' : `Last update: ${age} ago`)
+    lines.push(errorText(state.error?.kind, true))
+  } else if (state.status === 'unavailable') {
+    lines.push(errorText(state.error?.kind))
+    lines.push('Retrying automatically.')
+  } else if (state.status === 'ok' && Number.isFinite(state.durationMs) && state.durationMs >= SLOW_REQUEST_MS) {
+    lines.push(`Hermes is slow: the last poll took ${formatDuration(state.durationMs)}.`)
+  }
+
+  if (
+    state.error?.kind === 'timeout' &&
+    Number.isFinite(state.durationMs) &&
+    state.durationMs >= SLOW_REQUEST_MS
+  ) {
+    lines.push(`The last attempt took ${formatDuration(state.durationMs)}.`)
+  }
+
+  return lines
+}
+
+const PROBLEM_TITLE = {
+  backend: 'Cannot read system load',
+  missing: 'Backend plugin missing',
+  network: 'Hermes backend offline',
+  offline: 'Hermes backend offline',
+  server: 'Hermes backend error',
+  timeout: 'Hermes backend timed out'
+}
+
+// Two short lines for an error tooltip: a title and one compact reason line.
+// The detailed figures stay on the chip; the tooltip is about the problem.
+function problemLines(state, now = Date.now()) {
+  const kind = state.error?.kind
+  const title = PROBLEM_TITLE[kind] ?? 'Hermes backend unavailable'
+
+  if (state.status === 'unavailable') {
+    if (kind === 'missing') {
+      return [title, 'Enable hermes-vitals-light, then restart.']
+    }
+
+    if (kind === 'offline' || kind === 'network') {
+      return [title, 'Stopped or reconnecting.']
+    }
+
+    if (kind === 'timeout') {
+      const took =
+        Number.isFinite(state.durationMs) && state.durationMs >= SLOW_REQUEST_MS
+          ? `No answer after ${formatDuration(state.durationMs)}.`
+          : 'No answer from the server.'
+
+      return [title, took]
+    }
+
+    if (kind === 'backend') {
+      return [title, 'psutil unavailable on the server.']
+    }
+
+    return [title, 'The server answered with an error.']
+  }
+
+  const age = formatAge(now - state.updatedAt)
+  const reading = age === 'just now' ? 'Last reading just now' : `Last reading ${age} ago`
+
+  if (kind === 'missing') {
+    return [title, `${reading} · enable and restart`]
+  }
+
+  if (kind === 'offline' || kind === 'network') {
+    return [title, `${reading} · stopped or reconnecting`]
+  }
+
+  if (kind === 'timeout') {
+    const took =
+      Number.isFinite(state.durationMs) && state.durationMs >= SLOW_REQUEST_MS
+        ? ` · last attempt ${formatDuration(state.durationMs)}`
+        : ''
+
+    return [title, `${reading}${took}`]
+  }
+
+  if (kind === 'backend') {
+    return [title, `${reading} · psutil unavailable`]
+  }
+
+  return [title, reading]
+}
+
 function tooltipLines(stats) {
   const lines = []
 
@@ -391,9 +744,18 @@ function tooltipLines(stats) {
   }
 
   const memory = stats.memory
+  const free = Number.isFinite(stats.free) ? formatFree(stats.free) : ''
 
   if (memory) {
-    lines.push(`RAM ${formatBytes(memory.used)} / ${formatBytes(memory.total)} (${formatPercent(memory.percent)})`)
+    lines.push(
+      `RAM ${formatBytes(memory.used)} / ${formatBytes(memory.total)} (${formatPercent(memory.percent)})${free ? ` · ${free}` : ''}`
+    )
+  } else if (free) {
+    lines.push(`Free RAM: ${free}`)
+  }
+
+  if (Number.isFinite(stats.waited?.seconds)) {
+    lines.push(`Waited on CPU: ${Math.round(stats.waited.seconds)}s/60 (${stats.waited.verdict ?? waitedVerdict(stats)})`)
   }
 
   const bySurface = Object.entries(stats.clients?.by_surface ?? {})
