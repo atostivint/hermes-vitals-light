@@ -89,9 +89,22 @@ poll backs off up to 30 s.
 `/stats` is read-only and goes through the backend's usual authentication. It exposes the
 hostname, the load figures and the two counts; no session ids, process list, paths or environment.
 
+**What it reads, and where it goes.** The backend half reads psutil's CPU / load / memory figures,
+two Linux `/proc` files (PSI and `MemAvailable`), the process table (pid, parent pid and command
+line) to count Hermes executables, and the server's own loopback `GET /api/status` for the session
+total. Beyond the Desktop/TUI's normal connection to its Hermes backend, the only network call the
+plugin makes is that loopback ask; it sends nothing to a third party and has no telemetry or
+self-updater. The TUI half runs the same `plugin_api.py` as a `python -c` child of the TUI, so it
+reads the machine the TUI runs on.
+
+The dashboard half is API-only: `dashboard/manifest.json` registers a hidden `/vitals` page so the
+web dashboard has a bundle to load beside `plugin_api.py`; the visible UI is the Desktop chip and the
+TUI card.
+
 ## Requirements
 
-- Hermes Desktop with plugin support (Desktop half) or `hermes --tui` (TUI half).
+- Hermes 0.22 or newer, with Hermes Desktop plugin support (Desktop half) or `hermes --tui`
+  (TUI half).
 - The backend half needs `psutil` and FastAPI, both already present in a `hermes serve`
   environment; no extra dependency is installed.
 - `waited` and `free` read Linux `/proc`; elsewhere the chip falls back to RAM % and omits `waited`.
@@ -99,26 +112,32 @@ hostname, the load figures and the two counts; no session ids, process list, pat
 
 ## Install
 
-Desktop and TUI halves (this machine; the Desktop one ships off, enable it in
-**Capabilities → Plugins**; the TUI picks the widget up live, no restart):
+**Desktop half** (the machine running the Desktop app; it ships off and must be enabled):
+
+- From the catalog: open **Capabilities → Plugins**, find **Hermes Vitals Light**, and install it;
+  the app copies `desktop/plugin.js` into `desktop-plugins/`. Then enable it.
+- From a source checkout: `node scripts/build.mjs && node scripts/install.mjs --desktop`
+
+**Backend half** (the machine running the backend your Desktop connects to, e.g. over SSH):
 
 ```
-node scripts/build.mjs       # src/ -> desktop/plugin.js, tui/hermes-vitals-light.mjs
-node scripts/install.mjs     # -> <hermes home>/desktop-plugins/hermes-vitals-light/plugin.js
-                             #    <hermes home>/tui-widgets/hermes-vitals-light.mjs
-                             # (Windows: %LOCALAPPDATA%\hermes, else ~/.hermes;
-                             #  --desktop or --tui for one half only)
-```
-
-The TUI half needs nothing on a server: it measures the machine the TUI runs on.
-
-Backend half (on the machine running the backend your Desktop connects to, e.g. over SSH):
-
-```
+hermes plugins install hermes-vitals-light --enable       # from the catalog
+# or:
 hermes plugins install https://github.com/atostivint/hermes-vitals-light --enable
 hermes plugins enable hermes-vitals-light                 # user plugins must be in plugins.enabled
 # then restart that backend (hermes serve / dashboard)
 ```
+
+**TUI half** (optional, the machine running `hermes --tui`; it measures that machine):
+
+```
+cp ~/.hermes/plugins/hermes-vitals-light/tui/hermes-vitals-light.mjs ~/.hermes/tui-widgets/
+# Windows: %LOCALAPPDATA%\hermes\plugins\hermes-vitals-light\tui\hermes-vitals-light.mjs
+#          -> %LOCALAPPDATA%\hermes\tui-widgets\
+```
+
+The TUI picks the widget up live, no restart. From a source checkout, use
+`node scripts/build.mjs && node scripts/install.mjs --tui`.
 
 ## Uninstall
 
@@ -147,7 +166,7 @@ added after these figures and was not measured separately: it adds one ask of th
 ## Tests
 
 ```
-node --test test/load.test.mjs test/plugin.test.mjs test/tui.test.mjs        # Desktop + TUI halves (build first)
+node --test test/dashboard.test.mjs test/load.test.mjs test/plugin.test.mjs test/tui.test.mjs  # manifest + Desktop + TUI halves (build first)
 python -m unittest discover -s test -p "test_*.py"                           # backend unit
 pip install psutil fastapi httpx && python -m unittest discover -s test -p "test_*.py"
                                                                              # also mounts the real FastAPI route

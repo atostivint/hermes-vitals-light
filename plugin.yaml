@@ -4,6 +4,7 @@ name: hermes-vitals-light
 id: hermes-vitals-light
 kind: standalone
 version: 0.1.0
+requires_hermes: ">=0.22"
 description: >
   Shows the CPU and memory load of the server the Hermes Desktop is connected to
   (local or remote gateway) as a chip in the Desktop status bar.

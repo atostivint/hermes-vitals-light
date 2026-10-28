@@ -26,7 +26,7 @@
   },
   "scripts": {
     "build": "node scripts/build.mjs && node --check desktop/plugin.js && node --check tui/hermes-vitals-light.mjs",
-    "test": "node --test test/load.test.mjs test/plugin.test.mjs test/tui.test.mjs",
+    "test": "node --test test/dashboard.test.mjs test/load.test.mjs test/plugin.test.mjs test/tui.test.mjs",
     "install:plugin": "node scripts/build.mjs && node scripts/install.mjs"
   }
 }
