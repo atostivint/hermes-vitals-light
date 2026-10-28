@@ -54,7 +54,7 @@ function fireVisibility() {
 globalThis.__stubs = {
   atom,
   Codicon: 'Codicon',
-  host: { state: { connectionId, profile } },
+  host: { request: (...args) => globalThis.__hostRequest(...args), state: { connectionId, profile } },
   jsx: (type, props) => ({ props, type }),
   jsxs: (type, props) => ({ props, type }),
   STATUSBAR_AREAS: { right: 'statusBar.right' },
@@ -75,11 +75,13 @@ new Function(
 
 const settle = () => new Promise(resolve => setTimeout(resolve, 0))
 
-function load(rest, saved = {}) {
+function load(rest, saved = {}, request) {
   const registered = []
   const disposers = []
   const timers = []
   const pages = []
+
+  globalThis.__hostRequest = request
 
   globalThis.__plugin.register({
     onDispose: fn => disposers.push(fn),
@@ -192,6 +194,43 @@ test('a reply from /stats paints every figure, coloured by the waited verdict', 
   plugin.dispose()
 })
 
+test('RTT is the round trip of a gateway ping, and its switch stops the ping', async () => {
+  const pings = []
+  const plugin = load(
+    async () => STATS,
+    {},
+    method => {
+      pings.push(method)
+
+      return Promise.resolve({ pong: true })
+    }
+  )
+
+  await plugin.fire()
+
+  assert.deepEqual(pings, ['ping'])
+  assert.match(text(plugin.chip().props.children), / · RTT (?:<1|\d+) ms$/)
+  assert.match(text(plugin.chip().props.label), /RTT (?:<1|\d+) ms/)
+
+  plugin.toggles().find(row => row.props.label === 'RTT').props.onChange(false)
+  await plugin.fire()
+
+  assert.deepEqual(pings, ['ping'], 'no ping while RTT is switched off')
+  assert.doesNotMatch(text(plugin.chip().props.children), /RTT/)
+  plugin.dispose()
+})
+
+test('a gateway without ping leaves RTT out and still paints the figures', async () => {
+  const plugin = load(async () => STATS, {}, async () => {
+    throw new Error('gateway unavailable')
+  })
+
+  await plugin.fire()
+
+  assert.equal(text(plugin.chip().props.children), 'CPU 23% · Load 1.50 · 4.0G free · waited 15s/60')
+  plugin.dispose()
+})
+
 test('each figure has a switch in Settings, saved; hiding one keeps the verdict colour', async () => {
   const plugin = load(async () => STATS)
 
@@ -201,7 +240,7 @@ test('each figure has a switch in Settings, saved; hiding one keeps the verdict 
   assert.equal(plugin.pages[0].title, 'Hermes Vitals Light')
   assert.deepEqual(
     rows.map(row => row.props.label),
-    ['CPU', 'Load average', 'RAM', 'Waited on CPU', 'Active sessions', 'Hermes processes']
+    ['CPU', 'Load average', 'RAM', 'Waited on CPU', 'RTT', 'Active sessions', 'Hermes processes']
   )
   assert.ok(rows.every(row => row.props.checked))
 
@@ -217,6 +256,7 @@ test('each figure has a switch in Settings, saved; hiding one keeps the verdict 
     load: true,
     processes: true,
     ram: false,
+    rtt: true,
     waited: true
   })
   plugin.dispose()
@@ -244,7 +284,7 @@ test('counts switched off are skipped on the server from the next poll', async (
 
 test('saved settings come back on load, and every figure off leaves the icon', async () => {
   const plugin = load(async () => STATS, {
-    chip: { clients: false, cpu: false, load: false, processes: false, ram: false, waited: false }
+    chip: { clients: false, cpu: false, load: false, processes: false, ram: false, rtt: false, waited: false }
   })
 
   await plugin.fire()

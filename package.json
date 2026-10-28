@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Hermes Desktop and TUI plugin: CPU, load, RAM and CPU pressure of the connected server in the status bar.",
+  "description": "Hermes Desktop and TUI plugin: CPU, load, RAM, CPU pressure and RTT of the connected server in the status bar.",
   "license": "MIT",
   "homepage": "https://github.com/atostivint/hermes-vitals-light#readme",
   "repository": {
