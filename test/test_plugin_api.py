@@ -480,6 +480,68 @@ class CachedProcesses(unittest.TestCase):
         api.psutil.process_iter.assert_not_called()
 
 
+class TwoPassScan(unittest.TestCase):
+    """The name-only pass decides which processes get their command line read."""
+
+    @staticmethod
+    def proc(pid, ppid, name, cmdline):
+        process = mock.Mock()
+        process.info = {"pid": pid, "ppid": ppid, "name": name}
+        process.cmdline.return_value = cmdline
+
+        return process
+
+    def scan(self, procs):
+        api = load_plugin_api()
+        api.psutil = mock.Mock()
+        api.psutil.process_iter.return_value = procs
+
+        return api._scan_hermes_processes(), api
+
+    def test_the_first_pass_never_asks_for_the_command_line(self):
+        _, api = self.scan([])
+
+        api.psutil.process_iter.assert_called_once_with(["pid", "ppid", "name"])
+
+    def test_windows_process_names_are_recognised(self):
+        # psutil names the executable alone: "python.exe" must not hide a Hermes python.
+        procs = [
+            self.proc(10, 1, "hermes.exe", [r"C:\venv\Scripts\hermes.exe", "serve"]),
+            self.proc(11, 1, "python.exe", [r"C:\venv\Scripts\python.exe", "-m", "agent.legacy_cli", "chat"]),
+            self.proc(12, 1, "Hermes.exe", [r"C:\hermes\Hermes.exe"]),  # the Desktop, never counted
+        ]
+        counts, _ = self.scan(procs)
+
+        self.assertEqual(counts, {"total": 2, "by_command": {"agent": 1, "serve": 1}})
+
+    def test_only_candidates_have_their_command_line_read(self):
+        procs = [
+            self.proc(20, 1, "chrome.exe", [r"C:\chrome.exe"]),
+            self.proc(21, 1, "systemd", ["/usr/lib/systemd/systemd"]),
+            self.proc(22, 1, "python3.12", ["/usr/bin/python3.12", "-m", "tui_gateway.entry"]),
+        ]
+        counts, _ = self.scan(procs)
+
+        procs[0].cmdline.assert_not_called()
+        procs[1].cmdline.assert_not_called()
+        self.assertEqual(counts, {"total": 1, "by_command": {"tui": 1}})
+
+    def test_a_process_that_dies_between_the_passes_is_skipped(self):
+        dying = self.proc(30, 1, "hermes", [])
+        dying.cmdline.side_effect = OSError("gone")
+        alive = self.proc(31, 1, "hermes", ["/usr/local/bin/hermes", "chat"])
+        counts, _ = self.scan([dying, alive])
+
+        self.assertEqual(counts, {"total": 1, "by_command": {"chat": 1}})
+
+    def test_the_ttl_of_both_caches_can_be_lengthened_from_the_environment(self):
+        with mock.patch.dict(os.environ, {"VITALS_STATUS_TTL": "60", "VITALS_PROCESS_TTL": "30"}):
+            api = load_plugin_api()
+
+        self.assertEqual(api.STATUS_TTL, 60.0)
+        self.assertEqual(api.PROCESS_TTL, 30.0)
+
+
 class HermesCommand(unittest.TestCase):
     def test_console_scripts_modules_and_shims_are_recognised(self):
         command = load_plugin_api().hermes_command

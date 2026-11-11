@@ -54,6 +54,10 @@ users it can see: each `hermes` command (`serve`, `chat`, `gateway`, `dashboard`
 Windows launcher and its python children, the TUI's `tui_gateway`, a `hermes` an agent runs
 from its terminal. The Desktop app itself (`Hermes`, capitalised) is not counted.
 
+Both background caches can be lengthened on a busy server: `VITALS_STATUS_TTL` (default 15 s)
+and `VITALS_PROCESS_TTL` (default 5 s), in seconds, in the backend's environment, so a loaded
+box is asked for its session count and process table less often.
+
 **Settings ▸ Plugins ▸ Hermes Vitals Light** has one switch per figure (CPU, Load average, RAM,
 Waited on CPU, RTT, Active sessions, Hermes processes), all on by default and saved per Desktop. A
 hidden figure is only hidden; the colour still comes from the waited verdict. With everything off

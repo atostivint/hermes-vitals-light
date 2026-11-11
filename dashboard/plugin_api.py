@@ -395,11 +395,16 @@ _process_lock = threading.Lock()
 # argv for every process on the box (the old single pass) held the GIL for
 # seconds on a loaded server and stalled the event loop.
 _HERMES_PROCESS_NAMES = frozenset({"hermes", "hermes-agent", "hermes-acp"})
-_PYTHON_NAMES = None  # resolved lazily to avoid importing re at module load issues
 
 
-def _is_python_name(name: str) -> bool:
-    return bool(_PYTHON.match(name))
+def _is_candidate_name(name: str) -> bool:
+    """Whether a bare process name can be Hermes: a console script or a python.
+
+    psutil names the executable alone, ``python.exe`` on Windows: the extension is
+    dropped first, the same way ``hermes_command`` normalises ``argv[0]``.
+    """
+    stem = _stem(name or "").lower()
+    return stem in _HERMES_PROCESS_NAMES or bool(_PYTHON.match(stem))
 
 
 def _scan_hermes_processes() -> dict[str, Any] | None:
@@ -415,8 +420,7 @@ def _scan_hermes_processes() -> dict[str, Any] | None:
             pid = info.get("pid")
             if pid is None:
                 continue
-            name = (info.get("name") or "").lower()
-            if name in _HERMES_PROCESS_NAMES or _is_python_name(name):
+            if _is_candidate_name(info.get("name") or ""):
                 candidates.append((pid, info.get("ppid") or 0, proc))
 
         # Second pass: read argv only for the handful of candidates above.
