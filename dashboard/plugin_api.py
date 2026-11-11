@@ -213,7 +213,8 @@ def read_pressure(system: str = sys.platform) -> dict[str, Any]:
 
 # ``/api/status`` also checks the config version, probes the gateway and lists the profiles and
 # components, so it is asked about every STATUS_TTL seconds, not at the chip's 3 s cadence.
-STATUS_TTL = 15.0
+# /api/status is heavy; tunable via VITALS_STATUS_TTL (seconds).
+STATUS_TTL = float(os.environ.get("VITALS_STATUS_TTL", "15.0"))
 _STATUS_TIMEOUT = 2.0
 _no_proxy = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # loopback never goes through a proxy
 # url -> (asked at, total or None). A failed ask is cached too, so an unreachable
@@ -384,16 +385,53 @@ def parse_skip(value: str | None) -> frozenset[str]:
 # The process scan is the expensive figure, and the first one can take seconds
 # on Windows. Keep the last answer; when it is stale, one background scan runs
 # and requests keep returning the previous count instead of waiting.
-PROCESS_TTL = 5.0
+# Tunable via VITALS_PROCESS_TTL (seconds) so a loaded server can scan less often.
+PROCESS_TTL = float(os.environ.get("VITALS_PROCESS_TTL", "5.0"))
 _process_cache: tuple[float, dict[str, Any] | None] = (0.0, None)
 _process_lock = threading.Lock()
+
+
+# Only processes that can plausibly be Hermes need their cmdline read; reading
+# argv for every process on the box (the old single pass) held the GIL for
+# seconds on a loaded server and stalled the event loop.
+_HERMES_PROCESS_NAMES = frozenset({"hermes", "hermes-agent", "hermes-acp"})
+
+
+def _is_candidate_name(name: str) -> bool:
+    """Whether a bare process name can be Hermes: a console script or a python.
+
+    psutil names the executable alone, ``python.exe`` on Windows: the extension is
+    dropped first, the same way ``hermes_command`` normalises ``argv[0]``.
+    """
+    stem = _stem(name or "").lower()
+    return stem in _HERMES_PROCESS_NAMES or bool(_PYTHON.match(stem))
 
 
 def _scan_hermes_processes() -> dict[str, Any] | None:
     if psutil is None:
         return None
     try:
-        rows = (p.info for p in psutil.process_iter(["pid", "ppid", "cmdline"]))
+        # First pass: cheap name-only scan (reads /proc/PID/stat, no argv).
+        candidates: list[Any] = []
+        for proc in psutil.process_iter(["pid", "ppid", "name"]):
+            info = getattr(proc, "info", None)
+            if not isinstance(info, dict):
+                continue
+            pid = info.get("pid")
+            if pid is None:
+                continue
+            if _is_candidate_name(info.get("name") or ""):
+                candidates.append((pid, info.get("ppid") or 0, proc))
+
+        # Second pass: read argv only for the handful of candidates above.
+        rows: list[dict[str, Any]] = []
+        for pid, ppid, proc in candidates:
+            try:
+                cmdline = proc.cmdline()
+            except Exception:  # psutil.NoSuchProcess, AccessDenied, OSError
+                cmdline = []
+            rows.append({"pid": pid, "ppid": ppid, "cmdline": cmdline})
+
         return count_hermes_processes(rows)
     except Exception as exc:  # psutil.Error, OSError: the chip just loses the count
         logger.debug("hermes-vitals-light: process table unreadable: %s", exc)
