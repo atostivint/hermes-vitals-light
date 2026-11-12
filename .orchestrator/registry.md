@@ -13,4 +13,4 @@ conflit actuelle. `statut` : `idle`, `in-flight`, `review`, `done`, `blocked`.
 | tui | — | — | `src/tui.src.mjs` (libre) | idle |
 | shared-figures | — | — | `src/load.js`, `src/options.js` (libres) | idle |
 | docs | ses_e3356f996ffeXVTAs6CV58ToWY | VITALS-6 maquette catalogue (43/43 sondes) | `assets/mockups/` | done |
-| release | ses_e33443ef0ffeoyNiHeweHyX2w3 | rebuild + preuves manquantes | `desktop/plugin.js`, `tui/hermes-vitals-light.mjs` (générés) | in-flight |
+| release | ses_e332124b0ffe1NVa80o55FqyLh | VITALS-3 release 0.1.2 → PR #15 | `README.md`, `CHANGELOG.md`, versions | review |
