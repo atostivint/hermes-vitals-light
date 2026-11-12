@@ -10,6 +10,11 @@ RAM, CPU pressure (Linux PSI) and RTT of the server it is connected to:
 measures the remote box, not your PC. Load is the 1-minute average (omitted when the server reports
 none); the tooltip adds hostname, cores, 5/15-min load, RAM used / total, free RAM, waited and RTT.
 
+<img src="assets/mockups/vitals-light.png" alt="Hermes Vitals Light in the Desktop status bar, with its tooltip open">
+
+The mockup above reproduces the Desktop status bar with the chip and its tooltip open, and the TUI
+card under it. It is a reconstruction of both surfaces, not a screenshot.
+
 `waited 15s/60` is Linux PSI CPU pressure: the seconds of the last minute at least one task was
 runnable but stalled waiting for a CPU, computed as `round(avg60 * 0.6)` from the `some` line of
 `/proc/pressure/cpu`. It is omitted when PSI is unreadable (macOS, Windows, containers without PSI).
@@ -21,8 +26,8 @@ psutil, subprocess or cache. If free RAM is unreadable, the chip falls back to t
 `RTT 12 ms` is the round trip of a WebSocket `ping` over the Desktop's live gateway socket,
 measured in the Desktop half (`host.request('ping')`); it is left out when that socket cannot
 answer. It is the connection the app actually uses, not ICMP ping and not the `/stats` request
-(whose process scan can take ~50 ms). The TUI has no server to ping, so its card does not offer
-it. RTT does not change the chip colour.
+(whose process scan runs in the background). The TUI has no server to ping, so its card does not
+offer it. RTT does not change the chip colour.
 
 The chip colour comes from the waited verdict, not from CPU or load: **red (stuck)** at
 `waited >= 25` or less than 1 GiB free, **amber (busy)** at `waited >= 10`, otherwise normal. On
@@ -50,9 +55,11 @@ plugin host (`isolation: host`) there is no address to ask and `👥` is left ou
 users it can see: each `hermes` command (`serve`, `chat`, `gateway`, `dashboard`…),
 `hermes-agent`, `hermes-acp`. The tooltip breaks it down by command
 (`Hermes running: chat 3 · serve 1`), so several agents launched in parallel show up as
-`chat 3`. A Hermes started by another one counts once, under its top-level ancestor: the
-Windows launcher and its python children, the TUI's `tui_gateway`, a `hermes` an agent runs
-from its terminal. The Desktop app itself (`Hermes`, capitalised) is not counted.
+`chat 3`. A Hermes folds into its parent only when that parent is itself Hermes: the Windows
+launcher and its python child count once under the launcher, a `tui_gateway` under the `hermes`
+that spawned it. The chain has to be contiguous in Hermes processes, so a `hermes serve` that a
+shell launched from an agent's terminal — a non-Hermes process in between — counts on its own.
+The Desktop app itself (`Hermes`, capitalised) is not counted.
 
 Both background caches can be lengthened on a busy server: `VITALS_STATUS_TTL` (default 15 s)
 and `VITALS_PROCESS_TTL` (default 5 s), in seconds, in the backend's environment, so a loaded
@@ -162,19 +169,34 @@ The TUI picks the widget up live, no restart. From a source checkout, use
 
 ## Footprint
 
-Measured on Windows 11, 528 processes, Hermes venv python (2026-10-19). The session count was
-added after these figures and was not measured separately: it adds one ask of the server's own
-`/api/status` every 15 s, with everything on, refreshed in the background.
+Measured on Windows 11 (10.0.26320), 524 processes, 31.7 GiB RAM, with the Hermes venv python
+3.11.16 and psutil 7.2.2, on 2026-11-12. **Working set** is the memory Task Manager shows (the
+resident pages); **private bytes** is the commit the process owns alone. They differ by about 10 MB
+on this interpreter, so each figure below names which one it is — the previous table did not, which
+is how "60 MB" and "43 MB" came to describe the same child.
 
 | What | Cost |
 |---|---|
-| `/stats` in `hermes serve`, everything on | the load figures only (well under 1 ms warm); at most one process scan per 5 s (~55 ms of CPU on 500 processes) and one `/api/status` ask per 15 s run in the background |
-| `/stats?skip=processes` | ~0.1 ms, plus the session count refreshed in the background every 15 s |
-| `/stats?skip=clients,processes` | ~0.1 ms |
-| PSI + free RAM read (Linux) | two small `/proc` files; ~41 µs mean / ~38 µs median of CPU per call on the deployment host (p99 84 µs), no psutil, subprocess, thread or cache |
-| First process scan after start | runs in the background; ~5 s of one core on Windows (no request waits for it) |
-| TUI card child (`python -c`) | ~60 MB RSS (launcher + python); ~2 % of a core with processes on (scan cached 5 s), ~0.4 % off |
-| Desktop half | one ~260-byte request every 3 s, none while the window is hidden; RTT adds one gateway `ping` per poll while shown |
+| `/stats` in `hermes serve`, everything on | 0.1 ms per poll (median of 300 here) for a 245-byte body: the load figures and the two counts from their caches. One process scan at most every 5 s and one `/api/status` ask every 15 s, both in the background |
+| `/stats?skip=processes` | 0.3 ms per poll (median of 300): the load figures and the cached session total, no scan |
+| `/stats?skip=clients,processes` | 0.3 ms per poll: the load figures only, no scan and no `/api/status` ask |
+| PSI + free RAM read (Linux) | unmeasured on this machine (Windows): two small `/proc` files, no psutil, subprocess, thread or cache |
+| First process scan after a start, before → after | **5.4 s → 22 ms**, then 30 ms → 3 ms for the scans after it. The old first pass asked for every process's parent: 5.17 s of its 5.29 s sat in `psutil_windows.ppid_map`, once per process, with the GIL held on the `hermes serve` event loop. The new pass reads names, then a candidate's argv, and takes one parent snapshot (9.7 ms) only when two Hermes processes could be nested |
+| TUI card child (`python -c`), everything on, before → after | **56.8 → 32.2 MB working set**, **43.2 → 22.5 MB private** |
+| TUI card child, both counts off, before → after | **57.4 → 31.1 MB working set**, **44.6 → 21.6 MB private** |
+| Desktop half | one `GET /stats` per poll (the 245-byte body above), nothing while the window is hidden, one gateway `ping` per poll while it is shown (RTT on) |
+| Imports the child no longer pays | FastAPI **+22.8 MB** and `urllib.request` **+4.7 MB** of working set on top of `import psutil`: the child serves no route, so it imports neither |
+
+`npm run footprint` re-measures the interpreter, the backend module and the child rows on the
+machine it runs on (Windows and Linux; macOS prints `unavailable` instead of guessing), and
+cross-checks the external sampler against the child's own report. The child is sampled through the
+real `startFeed` code, so the process measured is the one the TUI spawns. The session count is not
+part of these timings: it is one loopback `/api/status` ask every 15 s, run in the background.
+
+The child now spends 0.6 s of CPU in a 15 s run against 7.0 s before, most of the old figure being
+that first scan. Timings at this scale are noisy: the gaps between the three `/stats` rows are
+noise, one first poll in each run of 300 took about 0.35 s while its pages faulted in, and the rest
+stayed under a millisecond.
 
 ## Tests
 
@@ -229,7 +251,7 @@ committed halves do not match `src/` after `npm run build`.
   in the TUI). Hosts older than Settings ▸ Plugins show every figure.
 - CPU, load and RAM are always measured (one psutil call each, under 2 ms), and on Linux waited/free
   are one two-file `/proc` read; switching any figure off only hides it.
-- TUI: a TUI attached to a remote gateway still shows its own machine. On Windows psutil's
-  first process scan takes ~13 s of one core (750 processes; later scans ~0.1 s), so `⚙ N`
-  shows up that long after the card's first figures — the other figures are not delayed.
+- TUI: a TUI attached to a remote gateway still shows its own machine. The card's first line
+  leaves the process count out and the scan runs in the background, so `⚙ N` appears one line after
+  the other figures (the first scan took 22 ms on Windows here, 3 ms for the scans after it).
 - TUI: the Desktop and TUI options are separate (the Desktop's live in its local storage).

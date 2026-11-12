@@ -3,7 +3,7 @@
 name: hermes-vitals-light
 id: hermes-vitals-light
 kind: standalone
-version: 0.1.1
+version: 0.1.2
 requires_hermes: ">=0.22"
 description: >
   Shows the CPU, memory, load and, on Linux, CPU pressure of the server the Hermes

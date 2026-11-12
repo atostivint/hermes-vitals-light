@@ -36,11 +36,21 @@
   mesuré du tout.
 
 ## Pièges connus
+- **Le premier scan est le seul poste coûteux** (2026-11-11) : `psutil.process_iter` avec l'attribut
+  `ppid` reconstruit `ppid_map()` de toute la table — mesuré 5,8–6,3 s de CPU sur 535 process
+  Windows, 98 % du temps dans `psutil_windows.ppid_map`, GIL tenu par tranches de 16–37 ms (donc la
+  boucle asyncio de `hermes serve` est hachée). **Ne jamais remettre `ppid` dans la première passe.**
+  Après correction : ~20–30 ms à froid avec 2+ Hermes, 3 ms à chaud.
+- **Le repliement ne franchit pas un parent non-Hermes** (décision 2026-11-11) : un `hermes serve`
+  lancé depuis le terminal d'un agent compte **séparément**. Franchir les intermédiaires faisait
+  disparaître `serve` de la puce ; c'est rejeté.
+- **`fastapi` et `urllib.request` ne sont jamais importés dans l'entrée de flux** (`__name__ ==
+  "__main__"`, le child TUI) : mesuré +25 Mo pour FastAPI et +4,6 Mo pour `urllib.request` dans le
+  venv Hermes, pour du code que le child n'atteint pas. Toute réintroduction en import de module
+  annule le gain — c'est ce que surveille `StreamEntryPoint.test_stream_entry_does_not_import_fastapi`.
 - Toute modification ici **doit** être suivie de `npm run build` : le texte du fichier est inliné
   dans `tui/hermes-vitals-light.mjs`, et la CI échoue si les deux copies divergent.
-- Le scan de process est le poste coûteux : il tient le GIL sur une machine chargée. Il est en deux
-  passes (nom + ppid, puis `cmdline()` seulement pour les candidats) ; ne pas revenir à une passe
-  unique sur toute la table.
+  (`desktop/plugin.js` n'inline **pas** ce fichier : il ne doit pas changer.)
 - **Ne rien écrire sur stdout** en dehors de `stream()` : ce stdout est le tuyau JSON du widget TUI.
   Le log passe par `logger.debug`, jamais par `print`.
 - Un Hermes lancé par un autre Hermes compte sous son ancêtre de plus haut niveau ; l'Electron
@@ -57,3 +67,7 @@
 
 ## Fils ouverts
 - Vérifier le comptage contre un `hermes serve` réel : les tests utilisent un faux `/api/status`.
+- Vérifier que le chargeur du dashboard importe bien le fichier avec `__name__ != "__main__"` (les
+  tests le simulent avec `spec_from_file_location`), sinon `router` resterait `None`.
+- Non mesuré : le coût de `/api/status` lui-même, et les nouveaux chemins sous Linux/macOS
+  (`_parent_resolver` y fait un `ppid()` par pid, gratuit sur `/proc`).
