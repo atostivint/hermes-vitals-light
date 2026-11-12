@@ -8,6 +8,7 @@ End-to-end with the real psutil and FastAPI from the Hermes environment:
 
 import importlib.util
 import os
+import subprocess
 import sys
 import tempfile
 import threading
@@ -32,6 +33,10 @@ except ImportError:
     ROUTE_DEPS = False
 else:
     ROUTE_DEPS = True
+
+# The stream entry point must stay clear of FastAPI (25 MB of RSS in the TUI child). Without FastAPI
+# installed that import would fail for the wrong reason, so the check is skipped instead.
+HAVE_FASTAPI = importlib.util.find_spec("fastapi") is not None
 
 
 def load_plugin_api():
@@ -317,7 +322,7 @@ class ActiveSessions(unittest.TestCase):
     def test_an_unreachable_server_is_none_and_is_not_asked_again_within_the_ttl(self):
         api = load_plugin_api()
 
-        with mock.patch.object(api._no_proxy, "open", side_effect=OSError("refused")) as opened:
+        with mock.patch.object(api._status_opener(), "open", side_effect=OSError("refused")) as opened:
             self.assertIsNone(api.active_sessions("http://127.0.0.1:1/api/status", clock=lambda: 100.0))
             self.assertIsNone(api.active_sessions("http://127.0.0.1:1/api/status", clock=lambda: 101.0))
             self.assertEqual(opened.call_count, 1)
@@ -330,7 +335,7 @@ class ActiveSessions(unittest.TestCase):
     def test_an_unexpected_reader_error_still_fails_open(self):
         api = load_plugin_api()
 
-        with mock.patch.object(api._no_proxy, "open", side_effect=RuntimeError("boom")):
+        with mock.patch.object(api._status_opener(), "open", side_effect=RuntimeError("boom")):
             self.assertIsNone(api.active_sessions("http://127.0.0.1:1/api/status", clock=lambda: 100.0))
 
 
@@ -491,17 +496,114 @@ class TwoPassScan(unittest.TestCase):
 
         return process
 
-    def scan(self, procs):
+    def scan(self, procs, parents=None, system="linux"):
         api = load_plugin_api()
         api.psutil = mock.Mock()
         api.psutil.process_iter.return_value = procs
+        table = {p.info["pid"]: p.info["ppid"] for p in procs}
+        table.update(parents or {})
+        api.psutil.Process.side_effect = lambda pid: mock.Mock(**{"ppid.return_value": table.get(pid, 0)})
 
-        return api._scan_hermes_processes(), api
+        return api._scan_hermes_processes(system=system), api
 
     def test_the_first_pass_never_asks_for_the_command_line(self):
         _, api = self.scan([])
 
-        api.psutil.process_iter.assert_called_once_with(["pid", "ppid", "name"])
+        api.psutil.process_iter.assert_called_once_with(["pid", "name"])
+
+    def test_scan_does_not_read_ppid_when_at_most_one_hermes(self):
+        # Nesting needs a second Hermes process: with one (or none) no parent may be read, the
+        # first pass may not ask the table for one (on Windows that walks every handle), and the
+        # Windows parent snapshot may not even be taken.
+        for procs in (
+            [],
+            [self.proc(10, 1, "hermes", ["/usr/bin/hermes", "serve"])],
+        ):
+            with self.subTest(hermes=len(procs)):
+                api = load_plugin_api()
+                asked, snapshots = [], []
+
+                class Table:
+                    def process_iter(self, attrs):
+                        asked.append(list(attrs))
+                        return procs
+
+                    def Process(self, pid):  # noqa: N802 - psutil's name
+                        raise AssertionError("no parent may be read with at most one Hermes")
+
+                api.psutil = Table()
+                api._windows_ppid_map = lambda: snapshots.append(1) or {}
+                expected = {"total": 0, "by_command": {}} if not procs else {"total": 1, "by_command": {"serve": 1}}
+
+                self.assertEqual(api._scan_hermes_processes(system="win32"), expected)
+                self.assertEqual(asked, [["pid", "name"]])
+                self.assertEqual(snapshots, [], "no parent snapshot without a possible fold")
+
+    def test_a_hermes_launched_through_a_shell_counts_separately(self):
+        # hermes chat -> bash -c "hermes serve": the shell is not a Hermes candidate, so the chain
+        # is not contiguous there and the serve keeps its own count. That is HEAD's figure (3 on
+        # the five processes of the report) and the one the chip shows.
+        procs = [
+            self.proc(70, 1, "hermes", ["/usr/bin/hermes", "chat"]),
+            self.proc(71, 70, "bash", ["/bin/bash", "-c", "hermes serve"]),
+            self.proc(72, 71, "hermes", ["/usr/bin/hermes", "serve"]),
+        ]
+        counts, _ = self.scan(procs)
+
+        self.assertEqual(counts, {"total": 2, "by_command": {"chat": 1, "serve": 1}})
+
+    def test_only_candidates_have_their_parent_read(self):
+        procs = [
+            self.proc(80, 1, "hermes", ["/usr/bin/hermes", "chat"]),
+            self.proc(81, 1, "hermes", ["/usr/bin/hermes", "serve"]),
+            self.proc(82, 1, "chrome.exe", [r"C:\chrome.exe"]),
+        ]
+        counts, api = self.scan(procs)
+
+        self.assertEqual(counts, {"total": 2, "by_command": {"chat": 1, "serve": 1}})
+        # The two candidates are asked for their parent, once each; 82 (never a candidate) is not,
+        # and the walk never asks for a parent of a parent.
+        self.assertEqual([call.args[0] for call in api.psutil.Process.call_args_list], [80, 81])
+
+    def test_the_parent_snapshot_is_taken_at_most_once_per_scan(self):
+        # On Windows psutil 7.2.2 rebuilds ppid_map() inside every Process.ppid() (~11 ms each,
+        # 19 calls = 220 ms), while one _pswindows.ppid_map() answers them all (~11 ms in total).
+        procs = [
+            self.proc(90, 1, "hermes", ["/usr/bin/hermes", "chat"]),
+            self.proc(91, 1, "hermes", ["/usr/bin/hermes", "serve"]),
+            self.proc(92, 90, "hermes", ["/usr/bin/hermes", "gateway"]),
+        ]
+        api = load_plugin_api()
+        api.psutil = mock.Mock()
+        api.psutil.process_iter.return_value = procs
+        snapshots = []
+
+        def snapshot():
+            snapshots.append(1)
+            return {90: 1, 91: 1, 92: 90}
+
+        api._windows_ppid_map = snapshot
+
+        counts = api._scan_hermes_processes(system="win32")
+
+        self.assertEqual(counts, {"total": 2, "by_command": {"chat": 1, "serve": 1}})
+        self.assertEqual(len(snapshots), 1, "one snapshot answers every parent of one scan")
+        api.psutil.Process.assert_not_called()  # no per-pid ppid() on the snapshot path
+
+    def test_a_snapshot_that_is_gone_falls_back_to_one_parent_per_pid(self):
+        # A psutil bump that renames or drops the private accessor must only cost the headroom.
+        procs = [
+            self.proc(90, 1, "hermes", ["/usr/bin/hermes", "chat"]),
+            self.proc(91, 90, "hermes", ["/usr/bin/hermes", "serve"]),
+        ]
+        api = load_plugin_api()
+        api.psutil = mock.Mock()
+        api.psutil.process_iter.return_value = procs
+        api.psutil.Process.side_effect = lambda pid: mock.Mock(**{"ppid.return_value": {90: 1, 91: 90}[pid]})
+        api._windows_ppid_map = lambda: None
+
+        self.assertEqual(api._scan_hermes_processes(system="win32"), {"total": 1, "by_command": {"chat": 1}})
+        self.assertEqual([call.args[0] for call in api.psutil.Process.call_args_list], [90, 91])
 
     def test_windows_process_names_are_recognised(self):
         # psutil names the executable alone: "python.exe" must not hide a Hermes python.
@@ -577,14 +679,15 @@ class HermesCommand(unittest.TestCase):
 
 
 class CountHermesProcesses(unittest.TestCase):
-    def test_a_hermes_started_by_another_counts_under_its_top_level_ancestor(self):
+    def test_a_contiguous_chain_folds_and_a_wrapper_does_not(self):
         counts = load_plugin_api().count_hermes_processes([
             {"pid": 1, "ppid": 0, "cmdline": ["/sbin/init"]},
             {"pid": 10, "ppid": 1, "cmdline": ["hermes", "serve"]},
-            # Windows launcher and its python child: one executable.
+            # Windows launcher and its python child: one executable, still contiguous.
             {"pid": 20, "ppid": 1, "cmdline": ["hermes.exe", "chat"]},
             {"pid": 21, "ppid": 20, "cmdline": ["python.exe", "hermes.exe", "chat"]},
-            # The TUI: hermes chat -> node -> tui_gateway.
+            # The TUI: hermes chat -> node -> tui_gateway. node is not a Hermes candidate, so the
+            # chain stops there and the gateway keeps its own count (HEAD's scan shows 5 here).
             {"pid": 30, "ppid": 1, "cmdline": ["hermes", "--tui"]},
             {"pid": 31, "ppid": 30, "cmdline": ["node", "ui-tui/dist/entry.js"]},
             {"pid": 32, "ppid": 31, "cmdline": ["python", "-m", "tui_gateway.entry"]},
@@ -593,7 +696,29 @@ class CountHermesProcesses(unittest.TestCase):
             {"pid": 60, "ppid": 1, "cmdline": ["Hermes.exe"]},
         ])
 
-        self.assertEqual(counts, {"total": 4, "by_command": {"chat": 3, "serve": 1}})
+        self.assertEqual(counts, {"total": 5, "by_command": {"chat": 3, "serve": 1, "tui": 1}})
+
+    def test_a_hermes_started_directly_by_another_folds(self):
+        # The two contiguous shapes: launcher -> python child, chat -> tui_gateway. One process each.
+        counts = load_plugin_api().count_hermes_processes([
+            {"pid": 20, "ppid": 1, "cmdline": ["hermes.exe", "chat"]},
+            {"pid": 21, "ppid": 20, "cmdline": ["python.exe", "hermes.exe", "chat"]},
+            {"pid": 30, "ppid": 1, "cmdline": ["hermes", "--tui"]},
+            {"pid": 31, "ppid": 30, "cmdline": ["python", "-m", "tui_gateway.entry"]},
+        ])
+
+        self.assertEqual(counts, {"total": 2, "by_command": {"chat": 2}})
+
+    def test_a_hermes_under_a_non_hermes_parent_counts_separately(self):
+        # An agent's terminal -> shell -> hermes serve: the shell breaks the chain, so the serve is
+        # not folded into the Hermes that started the agent (what the chip has always shown).
+        counts = load_plugin_api().count_hermes_processes([
+            {"pid": 10, "ppid": 1, "cmdline": ["hermes", "chat"]},
+            {"pid": 11, "ppid": 10, "cmdline": ["powershell.exe"]},
+            {"pid": 12, "ppid": 11, "cmdline": ["hermes", "serve"]},
+        ])
+
+        self.assertEqual(counts, {"total": 2, "by_command": {"chat": 1, "serve": 1}})
 
     def test_a_ppid_cycle_does_not_hang(self):
         counts = load_plugin_api().count_hermes_processes([
@@ -602,6 +727,47 @@ class CountHermesProcesses(unittest.TestCase):
         ])
 
         self.assertEqual(counts, {"total": 1, "by_command": {"serve": 1}})
+
+    def test_rows_without_a_ppid_count_the_same_as_rows_with_one(self):
+        rows = [
+            {"pid": 10, "ppid": 1, "cmdline": ["hermes.exe", "chat"]},
+            {"pid": 11, "ppid": 10, "cmdline": ["python.exe", "hermes.exe", "chat"]},
+            {"pid": 20, "ppid": 1, "cmdline": ["hermes", "serve"]},
+            {"pid": 30, "ppid": 2, "cmdline": ["node", "entry.js"]},
+            {"pid": 40, "ppid": 1, "cmdline": ["hermes", "chat"]},
+        ]
+        parents = {row["pid"]: row["ppid"] for row in rows}
+        api = load_plugin_api()
+
+        self.assertEqual(
+            api.count_hermes_processes([{"pid": r["pid"], "cmdline": r["cmdline"]} for r in rows], parents.get),
+            api.count_hermes_processes(rows),
+        )
+        # 11 is the python child of the 10 launcher (one chat); 20 and 40 are their own.
+        self.assertEqual(api.count_hermes_processes(rows), {"total": 3, "by_command": {"chat": 2, "serve": 1}})
+
+    def test_a_lazy_parent_cycle_does_not_hang(self):
+        rows = [
+            {"pid": 1, "cmdline": ["hermes", "serve"]},
+            {"pid": 2, "cmdline": ["bash", "-c", "hermes serve"]},
+            {"pid": 3, "cmdline": ["hermes", "chat"]},
+        ]
+        parents = {1: 2, 2: 1, 3: 0}  # a cycle among non-Hermes pids: the walk must still stop
+
+        counts = load_plugin_api().count_hermes_processes(rows, parents.get)
+
+        self.assertEqual(counts, {"total": 2, "by_command": {"chat": 1, "serve": 1}})
+
+    def test_an_unreadable_parent_is_treated_as_a_root(self):
+        def parents(pid):
+            raise OSError(f"no access to {pid}")
+
+        counts = load_plugin_api().count_hermes_processes(
+            [{"pid": 1, "cmdline": ["hermes", "serve"]}, {"pid": 2, "cmdline": ["hermes", "chat"]}],
+            parents,
+        )
+
+        self.assertEqual(counts, {"total": 2, "by_command": {"chat": 1, "serve": 1}})
 
 
 class SnapshotFailOpen(unittest.TestCase):
@@ -675,6 +841,55 @@ class Stream(unittest.TestCase):
         self.assertEqual(parse("clients, processes"), {"clients", "processes"})
         self.assertEqual(parse("cpu,ram,bogus"), frozenset(), "the load figures are always measured")
         self.assertEqual(parse(None), frozenset())
+
+
+@unittest.skipUnless(HAVE_FASTAPI, "install fastapi to prove the stream entry point stays clear of it")
+class StreamEntryPoint(unittest.TestCase):
+    """The TUI runs this file as `python -c`, so `__main__` must not pay for the route's imports.
+
+    FastAPI alone is ~25 MB of RSS in the child (pydantic and starlette with it), and
+    ``urllib.request`` another ~4.6 MB; neither is reachable from ``stream()``.
+    """
+
+    FORBIDDEN = ("fastapi", "pydantic", "starlette", "urllib.request")
+
+    def run_entry_point(self):
+        """The module file started the way the feed starts it: first JSON line and import log."""
+        env = dict(os.environ, VITALS_INTERVAL="60", VITALS_SKIP="clients,processes", PYTHONIOENCODING="utf-8")
+        with tempfile.TemporaryDirectory() as tmp:
+            # stderr goes to a file: -X importtime prints more than a pipe holds, and a full pipe
+            # would block the child before it ever reaches the first line.
+            log = Path(tmp) / "importtime.log"
+            with log.open("w", encoding="utf-8") as stderr:
+                child = subprocess.Popen(
+                    [sys.executable, "-X", "importtime", str(ROOT / "dashboard/plugin_api.py")],
+                    stdout=subprocess.PIPE,
+                    stderr=stderr,
+                    env=env,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                )
+                first = []
+                reader = threading.Thread(target=lambda: first.append(child.stdout.readline()), daemon=True)
+                reader.start()
+                reader.join(60)  # a child that never prints must fail this test, not hang it
+                child.kill()
+                child.wait(timeout=10)
+                child.stdout.close()
+            return (first[0] if first else ""), log.read_text(encoding="utf-8", errors="replace")
+
+    def test_stream_entry_does_not_import_fastapi(self):
+        import json
+
+        line, imports = self.run_entry_point()
+
+        self.assertTrue(line.strip(), f"the feed printed no line; import log tail:\n{imports[-600:]}")
+        self.assertIn("ok", json.loads(line))
+        # `urllib.request` is the module this file used to import (4.6 MB); plain `urllib` /
+        # `urllib.parse` can arrive through site-packages' own imports, so they prove nothing.
+        for module in self.FORBIDDEN:
+            self.assertNotIn(module, imports, f"{module} is imported by the stream entry point")
 
 
 @unittest.skipUnless(ROUTE_DEPS, "install psutil, fastapi and httpx to run the mounted route")
