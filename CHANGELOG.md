@@ -4,6 +4,39 @@ All notable changes to this plugin are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.2] - 2026-11-12
+
+Faster backend scans and a lighter TUI child: counting Hermes processes no longer stalls the
+server it measures.
+
+### Changed
+
+- **Process scan.** The scan reads the process names first and a candidate's argv second, and asks
+  for a parent only when two Hermes processes could be nested, from one table snapshot on Windows
+  instead of one parent map rebuilt per process. The first scan after a start drops from 5.4 s to
+  22 ms here (30 ms to 3 ms for the scans after it) and no longer holds the GIL on the
+  `hermes serve` event loop for seconds. The count is unchanged.
+- **TUI child.** The Python child behind the TUI card no longer imports FastAPI (+22.8 MB) or
+  `urllib.request` (+4.7 MB): it serves no route, so the router and the `/api/status` opener are
+  only built where they are used. The child's working set goes from 56.8 to 32.2 MB here, private
+  bytes from 43.2 to 22.5 MB.
+
+### Added
+
+- `npm run footprint`: measures the interpreter, the `dashboard/plugin_api.py` import and the real
+  TUI feed child (spawned through `startFeed`) on the machine it runs on, with a self-report
+  cross-check. Node builtins only, no new dependency.
+- `assets/mockups/`: a reconstruction of the Desktop status bar with the chip's tooltip open and
+  the TUI card, embedded in the README.
+
+### Fixed
+
+- A Hermes now folds only into a parent that is itself Hermes, so a `hermes serve` launched from a
+  shell counts on its own instead of folding into a distant Hermes ancestor. The rule is written
+  down in the code and in the README.
+- The README's footprint figures are measured, say which memory figure they report (working set or
+  private bytes), and come with the command that reproduces them.
+
 ## [0.1.1] - 2026-10-28
 
 Cross-platform server release: Windows and macOS backends now report free RAM and no longer

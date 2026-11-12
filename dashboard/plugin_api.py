@@ -24,11 +24,19 @@ and the count is left out. It is a total: no per-client breakdown.
 
 The process count is every Hermes executable running on the box, any profile: ``hermes``
 (per subcommand: ``serve``, ``chat``, ``gateway``…), ``hermes-agent``, ``hermes-acp``, or a
-python running one of them. A Hermes started by another Hermes (the Windows launcher's python
-child, the TUI's ``tui_gateway``, an agent running ``hermes`` from its terminal) counts under
-its top-level ancestor. The Electron Desktop (``Hermes``, capitalised) is not counted. The scan
-is cached for 5 s and refreshed in the background, so it never blocks a request either: the first
-answer after a start can omit the count.
+python running one of them. A Hermes folds into its parent only when that parent is a Hermes
+candidate too: the chain has to be contiguous in Hermes processes (the Windows launcher and its
+python child, a ``tui_gateway`` started directly by the ``hermes`` that spawned it), and the walk
+stops at the first parent that is not one. So a ``hermes serve`` a shell launched from an agent's
+terminal — a non-Hermes process between it and the Hermes that ultimately started it — is counted
+on its own, which is the figure 0.1.1 showed. The Electron Desktop (``Hermes``, capitalised) is
+not counted. The scan reads the process names first and a candidate's argv second, and resolves a
+parent only when two Hermes candidates could be nested: asking Windows for the parent of every
+process walks the whole handle table (seconds of CPU, GIL held, which stalls the event loop of the
+``hermes serve`` it measures). Those parents come from one snapshot of the table where psutil
+exposes ``ppid_map`` (Windows) and from one handle per visited pid elsewhere. The scan is cached
+for 5 s and refreshed in the background, so it never blocks a request either: the first answer
+after a start can omit the count.
 
 ``?skip=clients,processes`` leaves those counts out and does not measure them: the chip asks
 for it when they are switched off in its settings (the TUI passes ``VITALS_SKIP``).
@@ -41,7 +49,10 @@ still answer, and an unreachable ``/api/status``, unreadable process table or un
 
 The dashboard loader imports this file as a top-level module, so it stays self-contained. The TUI
 widget (``src/tui.src.mjs``) inlines it too and runs it as ``python -c``: ``stream()`` prints the
-same body as a JSON line every 3 s.
+same body as a JSON line every 3 s. That entry point (``__name__ == "__main__"``) serves no route,
+so it builds no router and imports neither FastAPI (25 MB of RSS on import, pydantic and starlette
+with it) nor ``urllib.request`` (4.6 MB): both are only reachable from the route, which only the
+dashboard path defines.
 """
 
 from __future__ import annotations
@@ -55,18 +66,27 @@ import re
 import sys
 import threading
 import time
-import urllib.request
 from collections import Counter
-from typing import Any, Iterable
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # annotations only: `from __future__ import annotations` keeps them strings
+    from typing import Any, Callable, Iterable
 
 logger = logging.getLogger(__name__)
 
-try:  # FastAPI exists in the serve/dashboard env, not in the plugin's unit-test env.
-    from fastapi import APIRouter, Request, Response
-
-    router = APIRouter()
-except ImportError:  # pragma: no cover - unit env without FastAPI
+# The TUI feed runs this file as `python -c`, so `__main__` is the stream entry point: it serves no
+# route, and importing FastAPI there would cost the child ~25 MB of RSS for nothing. The dashboard
+# loader imports the file as a top-level module instead and needs the router. FastAPI exists in the
+# serve/dashboard env, not in the plugin's unit-test env, hence the guard.
+if __name__ == "__main__":
     router = None
+else:
+    try:
+        from fastapi import APIRouter, Request, Response
+
+        router = APIRouter()
+    except ImportError:  # pragma: no cover - unit env without FastAPI
+        router = None
 
 try:
     import psutil
@@ -216,12 +236,26 @@ def read_pressure(system: str = sys.platform) -> dict[str, Any]:
 # /api/status is heavy; tunable via VITALS_STATUS_TTL (seconds).
 STATUS_TTL = float(os.environ.get("VITALS_STATUS_TTL", "15.0"))
 _STATUS_TIMEOUT = 2.0
-_no_proxy = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # loopback never goes through a proxy
 # url -> (asked at, total or None). A failed ask is cached too, so an unreachable
 # server is not hammered on every poll.
 _status_cache: dict[str, tuple[float, int | None]] = {}
 _status_lock = threading.Lock()
 _status_refreshing: set[str] = set()
+# Built on the first ask rather than at import: ``urllib.request`` costs ~4.6 MB of RSS and only the
+# route ever asks (the stream entry point passes no URL, so it has no server to ask).
+_no_proxy = None
+
+
+def _status_opener() -> Any:
+    """The ``/api/status`` opener, imported and built once: loopback never goes through a proxy."""
+    global _no_proxy
+    if _no_proxy is None:
+        import urllib.request
+
+        with _status_lock:  # the first thread to ask builds it, the others reuse it
+            if _no_proxy is None:
+                _no_proxy = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    return _no_proxy
 
 
 def _start_thread(target: Any) -> None:
@@ -251,7 +285,7 @@ def active_sessions(url: str, clock: Any = time.monotonic) -> int | None:
 
     total = None
     try:
-        with _no_proxy.open(url, timeout=_STATUS_TIMEOUT) as response:
+        with _status_opener().open(url, timeout=_STATUS_TIMEOUT) as response:
             total = json.load(response).get("active_sessions")
     except Exception as exc:  # OSError, HTTPException, ValueError, AttributeError: not a JSON object…
         logger.debug("hermes-vitals-light: /api/status unreadable: %s", exc)
@@ -344,36 +378,65 @@ def hermes_command(argv: list[str] | None) -> str | None:
     return fixed or _subcommand(rest)
 
 
-def count_hermes_processes(procs: Iterable[dict[str, Any]]) -> dict[str, Any]:
-    """Count top-level Hermes processes per command from ``{"pid", "ppid", "cmdline"}`` rows."""
-    parents: dict[int, int] = {}
+def count_hermes_processes(
+    procs: Iterable[dict[str, Any]],
+    parents: Callable[[int], int | None] | None = None,
+) -> dict[str, Any]:
+    """Count top-level Hermes processes per command from ``{"pid", "cmdline"}`` rows.
+
+    A row may carry its ``ppid``; when it does not, ``parents`` is asked for one, lazily, and
+    only for a candidate whose parent decides whether it folds. That keeps this function pure: it
+    never touches psutil itself, ``_scan_hermes_processes`` passes it the resolver.
+
+    A process folds into its parent only when that parent is itself a Hermes candidate: the chain
+    has to be contiguous in Hermes processes (the Windows launcher and its python child, a
+    ``tui_gateway`` started directly by the ``hermes`` that spawned it). The walk stops at the
+    first parent that is not a candidate, so a ``hermes serve`` a shell launched from an agent's
+    terminal stays a count of its own instead of folding into a distant Hermes ancestor.
+    """
+    given: dict[int, int] = {}
     commands: dict[int, str] = {}
     for info in procs:
         pid = info.get("pid")
         if pid is None:
             continue
-        parents[pid] = info.get("ppid") or 0
+        ppid = info.get("ppid")
+        if ppid is not None:
+            given[pid] = ppid
         command = hermes_command(info.get("cmdline"))
         if command is not None:
             commands[pid] = command
 
-    def under_another_hermes(pid: int) -> bool:
-        seen = {pid}
-        parent = parents.get(pid, 0)
-        while parent and parent not in seen:
-            if parent in commands:
-                return True
-            seen.add(parent)
-            parent = parents.get(parent, 0)
-        return False
+    memo: dict[int, int] = {}
 
-    by_command = Counter(cmd for pid, cmd in commands.items() if not under_another_hermes(pid))
+    def parent_of(pid: int) -> int:
+        """The parent of a visited pid: from its row, or asked once and remembered."""
+        if pid in given:
+            return given[pid] or 0
+        if pid not in memo:
+            ppid = None
+            if parents is not None:
+                try:
+                    ppid = parents(pid)
+                except Exception:  # psutil.Error, OSError: an unreadable parent is a root
+                    ppid = None
+            memo[pid] = ppid or 0
+        return memo[pid]
+
+    def under_another_hermes(pid: int) -> bool:
+        parent = parent_of(pid)
+        return bool(parent) and parent != pid and parent in commands
+
+    # Nesting needs two Hermes processes; with one (or none) there is no walk to do, so no
+    # parent is read at all: the expensive half of the scan is skipped unless it can matter.
+    counted = [pid for pid in commands if len(commands) < 2 or not under_another_hermes(pid)]
+    by_command = Counter(commands[pid] for pid in counted)
     return {"total": sum(by_command.values()), "by_command": dict(sorted(by_command.items()))}
 
 
 # The figures a client can switch off server-side: the load figures cost one psutil call, the
-# counts a ``/api/status`` call (every STATUS_TTL) and a full process scan (~50 ms of CPU per scan
-# on 500 processes).
+# counts a ``/api/status`` call (every STATUS_TTL) and a name-only pass over the process table
+# (every PROCESS_TTL).
 SKIPPABLE = ("clients", "processes")
 
 
@@ -407,13 +470,75 @@ def _is_candidate_name(name: str) -> bool:
     return stem in _HERMES_PROCESS_NAMES or bool(_PYTHON.match(stem))
 
 
-def _scan_hermes_processes() -> dict[str, Any] | None:
+def _ppid_of(pid: int) -> int | None:
+    """The parent of one pid, on demand: one process handle, not the whole table."""
+    try:
+        return psutil.Process(pid).ppid()
+    except Exception:  # psutil.Error (NoSuchProcess, AccessDenied), OSError
+        return None
+
+
+def _windows_ppid_map() -> dict[int, int] | None:
+    """Every pid's parent from one snapshot on Windows, or None when psutil has no such map.
+
+    ``Process.ppid()`` rebuilds that map for the whole table on every call on Windows (psutil
+    7.2.2: ~11 ms each, so the 19 visited pids of a 2-hermes scan cost ~220 ms), while
+    ``_pswindows.ppid_map()`` answers all of them from one snapshot (~11 ms). It is a **private**
+    accessor: the import fails on macOS and Linux, and a psutil release that renames or drops it
+    raises here too. Both are caught, and the scan then falls back to ``_ppid_of``, one handle per
+    pid: the count is identical, only the headroom of the snapshot is lost.
+    """
+    try:
+        from psutil import _pswindows
+
+        table = _pswindows.ppid_map()
+    except Exception:  # ImportError off Windows; AttributeError / OSError after a psutil bump
+        return None
+    return table if isinstance(table, dict) else None
+
+
+def _parent_resolver(system: str = sys.platform) -> Callable[[int], int | None]:
+    """The parent resolver for one scan, built on the first pid asked for.
+
+    Lazy on purpose: ``count_hermes_processes`` never asks with fewer than two Hermes candidates,
+    so a scan that cannot fold anything does not even take the parent snapshot.
+    """
+    table: dict[int, int] | None = None
+    asked = False
+
+    def parent_of(pid: int) -> int | None:
+        nonlocal table, asked
+        if not asked:
+            asked = True
+            if system.startswith("win"):
+                table = _windows_ppid_map()
+        if table is not None:
+            return table.get(pid)
+        return _ppid_of(pid)
+
+    return parent_of
+
+
+def _scan_hermes_processes(system: str = sys.platform) -> dict[str, Any] | None:
+    """Count Hermes processes without asking the table for a parent it does not need.
+
+    ``ppid`` is deliberately absent from the first pass: on Windows psutil rebuilds the parent
+    map of every process to answer it (``psutil_windows.ppid_map``: ~8 s of the ~8.3 s first
+    scan over 535 processes, with the GIL held, which stalls the event loop of the server this
+    measures). Names alone cost milliseconds; a parent is resolved only for a Hermes candidate,
+    once per scan from ``_parent_resolver`` (one table snapshot on Windows, one handle per visited
+    pid elsewhere), and not at all unless two Hermes candidates exist.
+
+    A candidate folds into its parent only when that parent is a candidate too: the chain has to
+    be contiguous, so the Windows launcher and its python child count once while a ``hermes``
+    started by a shell from an agent's terminal counts on its own.
+    """
     if psutil is None:
         return None
     try:
-        # First pass: cheap name-only scan (reads /proc/PID/stat, no argv).
-        candidates: list[Any] = []
-        for proc in psutil.process_iter(["pid", "ppid", "name"]):
+        # First pass: names only (no argv, no parent).
+        candidates: list[tuple[int, Any]] = []
+        for proc in psutil.process_iter(["pid", "name"]):
             info = getattr(proc, "info", None)
             if not isinstance(info, dict):
                 continue
@@ -421,18 +546,20 @@ def _scan_hermes_processes() -> dict[str, Any] | None:
             if pid is None:
                 continue
             if _is_candidate_name(info.get("name") or ""):
-                candidates.append((pid, info.get("ppid") or 0, proc))
+                candidates.append((pid, proc))
 
         # Second pass: read argv only for the handful of candidates above.
         rows: list[dict[str, Any]] = []
-        for pid, ppid, proc in candidates:
+        for pid, proc in candidates:
             try:
                 cmdline = proc.cmdline()
             except Exception:  # psutil.NoSuchProcess, AccessDenied, OSError
                 cmdline = []
-            rows.append({"pid": pid, "ppid": ppid, "cmdline": cmdline})
+            rows.append({"pid": pid, "cmdline": cmdline})
 
-        return count_hermes_processes(rows)
+        # Parents stay lazy, and a candidate's parent is only ever asked for here: a non-Hermes
+        # parent ends the chain (the shell an agent's terminal used), so no other pid is walked.
+        return count_hermes_processes(rows, _parent_resolver(system))
     except Exception as exc:  # psutil.Error, OSError: the chip just loses the count
         logger.debug("hermes-vitals-light: process table unreadable: %s", exc)
         return None

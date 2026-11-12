@@ -1,0 +1,384 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Hermes Vitals Light — Desktop status-bar chip and TUI card</title>
+<!--
+  Reconstruction of what the plugin actually looks like, at the size and colour of the
+  real crops in docs/images/ (all four are 1:1, so their pixels are CSS px):
+
+    desktop-chip.png     140 x 35   bar rows 0..30, #1F7AB7 row 31, black below
+    desktop-tooltip.png  274 x 172  tooltip 255 x 106 + notch, bar rows 132..165 + line 166
+    desktop-offline.png  317 x  94  tooltip rows 9..53, notch 54..58, bar rows 54..87 + accent 88
+    tui-card.png         867 x 135  card 592 x 40 at (232, 81) in the crop
+
+  Nothing here is invented: every colour and every length is one of the measurements
+  recorded next to the variable that uses it.
+-->
+<style>
+  :root {
+    /* ---- surfaces, measured ---------------------------------------------- */
+    /* App surface above the bar: desktop-tooltip.png rows 167..171 */
+    --surface: #0F1011;
+    /* Status bar: desktop-chip.png rows 0..30, desktop-offline.png rows 54..87 */
+    --bar-bg: #20252D;
+    /* Separator / hairline: the panel edge measured in desktop-tooltip.png rows 53/99
+       (fill #2C3036 for rows 54..98). The bar has no visible top edge in either crop
+       because the surface behind it is the bar's own colour; this hairline makes the
+       band readable on --surface. */
+    --bar-border: #2C3036;
+    /* 1px accent along the bar's bottom edge: desktop-chip.png row 31,
+       desktop-offline.png row 88 (desktop-tooltip.png row 166 is the same 1px line,
+       grey #757575 because that window was not focused). */
+    --bar-accent: #1F7AB7;
+
+    /* ---- status bar geometry, from the three bar crops ------------------- */
+    /* The crops show 34 rows of #20252D above the accent row, but the chip's baseline
+       sits 7.5 px above the accent row in all three (chip crop 15..23 / accent 31,
+       offline 72..80 / accent 88, tooltip 149..158 / divider 166). Centring an 11 px
+       line in that band puts the bar at 24..27 px; 26 is the value used. */
+    --bar-height: 26px;      /* 25 px of content + the 1 px accent = 26 */
+    --bar-pad-x: 8px;        /* desktop-tooltip.png: "Context" starts 7 px from the crop edge */
+    --item-gap: 16px;        /* desktop-offline.png: Context ends 89, chip starts 105 */
+
+    /* ---- the chip -------------------------------------------------------- */
+    --chip-font: 11px;       /* src/plugin.src.js: text-[0.6875rem] */
+    --chip-pad-x: 6px;       /* px-1.5 */
+    --chip-gap: 4px;         /* gap-1: desktop-chip.png icon ends 25, "L" starts 30 */
+    --icon-size: 11.2px;     /* Codicon size 0.7rem */
+    --chip-text: #7E858F;    /* desktop-chip.png glyph core */
+    --chip-glyph: #616870;   /* desktop-chip.png: the ⚙ glyph */
+    --context-text: #FFFFFF; /* desktop-tooltip.png "Context" */
+    --context-glyph: #B2BBC5;/* desktop-tooltip.png clock glyph */
+    --na-text: #FFFFFF;      /* desktop-tooltip.png "N/A" */
+    --na-glyph: #209CFF;     /* desktop-tooltip.png lightning bolt */
+
+    /* ---- the tooltip, from desktop-tooltip.png --------------------------- */
+    --tip-bg: #FFFFFF;       /* solid white, box x 13..267 */
+    --tip-text: #20252D;     /* darkest glyph pixel inside the box */
+    --tip-width: 255px;      /* x 13..267 */
+    --tip-radius: 4px;       /* corner rows 26..29 inset 3/2/1/0 */
+    --tip-pad-y: 4px;        /* 18 px line + 4 px = first glyph top at row 35 (box top 26) */
+    --tip-pad-x: 10px;       /* first glyph at x 23 (box left 13) */
+    --tip-font: 12px;        /* cap 8..9 rows, line pitch 19.7 px */
+    --tip-line: 18px;
+    --tip-gap: 2px;          /* gap-0.5: 18 + 2 = the 20 px pitch measured */
+    --notch-w: 10px;         /* rows 132..136: x 136..144 shrinking to 140 */
+    --notch-h: 5px;
+    --tip-lift: 1px;         /* box bottom row 131, bar top row 132 */
+    /* No shadow: desktop-tooltip.png rows 132..136 directly under the box (x 100, 150) are
+       the bar's own #20252B/#20252D, and the surface left of the box (x 0..12) is flat, so a
+       0.35 black blur would be visible and is not there. */
+
+    /* ---- the TUI card, from tui-card.png --------------------------------- */
+    --tui-bg: #000000;
+    --tui-amber: #D7875F;    /* card border, 2 px */
+    --tui-text: #FFAF5F;     /* card line */
+    --tui-dim: #D7AF00;      /* status line */
+    --tui-sep: #D7AF5F;      /* status line separators */
+    --tui-ready: #5FAF87;    /* "ready" */
+    --tui-radius: 6px;       /* corner rows 81..87, inset 6 -> 0 */
+    --tui-border: 2px;
+    --tui-font: 17px;        /* 562 px / 55 cells = 10.2 px per cell */
+    --tui-line: 20px;
+    --tui-pad-x: 12px;       /* card text starts 248, inner edge 234 */
+
+    /* ---- the two blocks on the page -------------------------------------- */
+    --page-w: 1600px;
+    --page-h: 900px;
+    --app-h: 740px;          /* Desktop block: surface + status bar at its bottom */
+    --tui-y: 740px;          /* TUI block starts on the block's last row */
+    --tui-h: 160px;
+    --tui-x: 366px;          /* the 867 px crop centred: (1600 - 867) / 2 = 366 */
+    --term-y: 752px;         /* crop row 0 -> page row 752, inside the TUI block */
+
+    --ui-font: 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif;
+    --mono: 'Cascadia Mono', 'Cascadia Code', Consolas, monospace;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: var(--page-w);
+    height: var(--page-h);
+    overflow: hidden;
+    background: var(--tui-bg);
+  }
+
+  /* =============================================================== Desktop */
+  .app {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: var(--page-w);
+    height: var(--app-h);
+    background: var(--surface);
+    font-family: var(--ui-font);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .statusbar {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: var(--bar-height);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 var(--bar-pad-x);
+    background: var(--bar-bg);
+    border-bottom: 1px solid var(--bar-accent);
+    box-shadow: inset 0 1px 0 var(--bar-border);
+    font-size: var(--chip-font);
+    line-height: 1;
+    white-space: nowrap;
+  }
+
+  .sb-left,
+  .sb-right {
+    display: flex;
+    align-items: center;
+    gap: var(--item-gap);
+    height: 100%;
+  }
+
+  .item {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--chip-gap);
+    height: 100%;
+    padding: 0 var(--chip-pad-x);
+  }
+
+  .item .glyph {
+    display: block;
+    width: var(--icon-size);
+    height: var(--icon-size);
+    flex: none;
+  }
+
+  .context { color: var(--context-text); font-weight: 500; }
+  .context .glyph { color: var(--context-glyph); }
+  .na { color: var(--na-text); }
+  .na .glyph { color: var(--na-glyph); }
+
+  /* statusBar.right, order 90: our chip, and the tooltip is anchored on it. */
+  .chip {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: var(--chip-gap);
+    height: 100%;
+    padding: 0 var(--chip-pad-x);
+    color: var(--chip-text);       /* VERDICT_COLOR.ok is undefined, so no verdict colour */
+    font-variant-numeric: tabular-nums;
+  }
+
+  .chip .glyph {
+    display: block;
+    width: var(--icon-size);
+    height: var(--icon-size);
+    flex: none;
+    color: inherit;                /* chipIcon() healthy: pulse, no colour override */
+  }
+
+  .chip-label { display: block; }
+  .chip .unit { color: var(--chip-glyph); }  /* the 👥 and ⚙ glyphs read darker in the crop */
+
+  /* Tip, healthy poll: tooltipLines() in order, above the chip. */
+  .tip {
+    position: absolute;
+    left: 50%;
+    bottom: calc(100% + var(--tip-lift));
+    transform: translateX(-50%);
+    width: var(--tip-width);
+    padding: var(--tip-pad-y) var(--tip-pad-x);
+    border-radius: var(--tip-radius);
+    background: var(--tip-bg);
+    color: var(--tip-text);
+    font-size: var(--tip-font);
+    line-height: var(--tip-line);
+    z-index: 2;
+  }
+
+  .tip-lines {
+    display: flex;
+    flex-direction: column;
+    gap: var(--tip-gap);
+  }
+
+  /* The notch: 10 px base, 5 px tall, centred over the chip, hanging into the bar. */
+  .tip::after {
+    content: '';
+    position: absolute;
+    top: 100%;
+    left: 50%;
+    margin-left: calc(var(--notch-w) / -2);
+    width: 0;
+    height: 0;
+    border: calc(var(--notch-w) / 2) solid transparent;
+    border-top-color: var(--tip-bg);
+  }
+
+  /* =================================================================== TUI */
+  .tui {
+    position: absolute;
+    left: 0;
+    top: var(--tui-y);
+    width: var(--page-w);
+    height: var(--tui-h);
+    background: var(--tui-bg);
+    border-top: 1px solid var(--bar-border);
+    overflow: hidden;
+    font-family: var(--mono);
+    font-size: var(--tui-font);
+    line-height: var(--tui-line);
+  }
+
+  /* The 867 x 135 crop, at 1:1, placed inside the black block. */
+  .term {
+    position: absolute;
+    left: var(--tui-x);
+    top: calc(var(--term-y) - var(--tui-y));
+    width: 867px;
+    height: 135px;
+    color: var(--tui-dim);
+  }
+
+  .term-status {
+    position: absolute;
+    left: 18px;
+    top: 34px;
+  }
+
+  .term-status .sep { color: var(--tui-sep); }
+  .term-status .ready { color: var(--tui-ready); }
+
+  .term-prompt {
+    position: absolute;
+    left: 19px;
+    top: 57px;
+    color: var(--tui-sep);
+  }
+
+  /* /vitals: rounded amber card, docked above the prompt. */
+  .term-card {
+    position: absolute;
+    left: 232px;
+    top: 81px;
+    display: flex;
+    align-items: center;
+    width: 592px;
+    height: 40px;
+    padding: 0 var(--tui-pad-x);
+    border: var(--tui-border) solid var(--tui-amber);
+    border-radius: var(--tui-radius);
+    color: var(--tui-text);
+  }
+
+  .term-card .row { white-space: pre; }
+  .term-card .cursor {
+    width: 2px;
+    height: 24px;
+    margin-left: 4px;
+    background: var(--tui-amber);
+    flex: none;
+  }
+</style>
+</head>
+<body>
+
+<!-- ===================================================== Desktop status bar -->
+<div class="app">
+  <div class="statusbar" id="statusbar">
+
+    <div class="sb-left">
+      <span class="item context">
+        <!-- codicon "clock" (codicons, MIT, (c) Microsoft) -->
+        <svg class="glyph" viewBox="0 0 16 16" aria-hidden="true" fill="currentColor">
+          <path d="M8 1.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13ZM.5 8a7.5 7.5 0 1 1 15 0 7.5 7.5 0 0 1-15 0Zm7-3.5V8l2.5 1.5.5-.86L8.5 7.25V4.5Z"/>
+        </svg>
+        <span>Context</span>
+      </span>
+    </div>
+
+    <div class="sb-right">
+      <!-- chipLabel(stats) with every figure shown:
+           CPU 33% · Load 1.60 · 3.8G free · 👥 2 · ⚙ 2
+           waitedVerdict() -> "ok" (free 3.8 GiB, no waited.seconds), and
+           VERDICT_COLOR.ok is undefined, so the chip keeps --chip-text. -->
+      <span class="chip" id="chip">
+        <!-- codicon "pulse" (codicons, MIT, (c) Microsoft) -->
+        <svg class="glyph" viewBox="0 0 16 16" aria-hidden="true" fill="currentColor">
+          <path d="M5.76002 2.49999C5.98102 2.50399 6.17302 2.65399 6.23202 2.86699L8.52102 11.19L10.271 5.35599C10.332 5.15399 10.513 5.01099 10.724 4.99999C10.935 4.98899 11.13 5.11199 11.211 5.30699L12.333 7.99899H14C14.276 7.99899 14.5 8.22299 14.5 8.49899C14.5 8.77499 14.276 8.99899 14 8.99899H12C11.798 8.99899 11.616 8.87799 11.538 8.69099L10.826 6.98299L8.97802 13.142C8.91402 13.356 8.71602 13.501 8.49302 13.498C8.27002 13.495 8.07602 13.346 8.01702 13.131L5.71402 4.75699L4.47502 8.64999C4.40902 8.85799 4.21602 8.99799 3.99902 8.99799H1.99902C1.72302 8.99799 1.49902 8.77399 1.49902 8.49799C1.49902 8.22199 1.72302 7.99799 1.99902 7.99799H3.63302L5.27202 2.84599C5.33902 2.63499 5.53702 2.49299 5.75802 2.49799L5.76002 2.49999Z"/>
+        </svg>
+        <span class="chip-label" id="chip-label">CPU 33% · Load 1.60 · 3.8G free · <span class="unit">&#128101;</span> 2 · <span class="unit">&#9881;&#xFE0E;</span> 2</span>
+
+        <!-- tooltipLines(stats), in order -->
+        <span class="tip" id="tip" role="tooltip">
+          <span class="tip-lines" id="tip-lines">
+            <span class="tip-line">oracle</span>
+            <span class="tip-line">CPU 33% · 4 cores</span>
+            <span class="tip-line">Load 1.6 / 1.25 / 0.99</span>
+            <span class="tip-line">RAM 1.9 GB / 5.8 GB (33%) · 3.8G free</span>
+            <span class="tip-line">Active sessions: 2</span>
+            <span class="tip-line">Hermes running: dashboard 1 · gateway 1</span>
+          </span>
+        </span>
+      </span>
+
+      <span class="item na">
+        <!-- codicon "zap" (codicons, MIT, (c) Microsoft) -->
+        <svg class="glyph" viewBox="0 0 16 16" aria-hidden="true" fill="currentColor">
+          <path d="M9.1 1.2 3.4 8.5h3.2l-.9 6.3 5.9-7.4H8.2l.9-6.2Z"/>
+        </svg>
+        <span>N/A</span>
+      </span>
+    </div>
+
+  </div>
+</div>
+
+<!-- =========================================================== TUI half -->
+<div class="tui" id="tui">
+  <div class="term" id="term">
+    <div class="term-status">
+      <span class="sep">–</span> <span class="ready">ready</span> <span class="sep">|</span> deepseek v4.1 flash <span class="sep">|</span> 1m 34 <span class="sep">|</span> 2 sessions <span class="sep">–</span> /opt/hermes-agent/src (main)
+    </div>
+    <div class="term-prompt">&#10095;</div>
+    <!-- chipLabel(stats, TUI figures) : CPU 75% · Load 1.27 · 2.8G free · waited 19s/60 · ⚙ 2 -->
+    <div class="term-card" id="tui-card">
+      <span class="row" id="tui-row">CPU 75% · Load 1.27 · 2.8G free · waited 19s/60 · &#9881;&#xFE0E; 2</span>
+      <span class="cursor"></span>
+    </div>
+  </div>
+</div>
+
+<!-- The stats the two halves were rendered from; the probe recomputes both labels
+     with src/load.js and compares them with the markup above. -->
+<script type="application/json" id="stats">
+{
+  "desktop": {
+    "hostname": "oracle",
+    "cpu_percent": 33,
+    "cpu_count": 4,
+    "load_avg": [1.6, 1.25, 0.99],
+    "free": 4080218931,
+    "memory": { "used": 2040109465, "total": 6227702579, "percent": 33 },
+    "clients": { "total": 2 },
+    "processes": { "total": 2, "by_command": { "dashboard": 1, "gateway": 1 } }
+  },
+  "tui": {
+    "cpu_percent": 75,
+    "load_avg": [1.27, 1.1, 0.98],
+    "free": 3006477107,
+    "waited": { "seconds": 19, "verdict": "busy" },
+    "processes": { "total": 2 }
+  }
+}
+</script>
+</body>
+</html>
