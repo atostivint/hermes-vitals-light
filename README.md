@@ -4,8 +4,7 @@
 
 [![CI](https://github.com/atostivint/hermes-vitals-light/actions/workflows/ci.yml/badge.svg)](https://github.com/atostivint/hermes-vitals-light/actions/workflows/ci.yml)
 
-Hermes **Desktop** and **TUI** plugin. The Desktop status-bar chip shows the CPU, load average, free
-RAM, CPU pressure (Linux PSI) and RTT of the server it is connected to:
+Hermes **Desktop** and **TUI** plugin. The Desktop status-bar chip shows the CPU, load, free RAM, Linux PSI CPU pressure, active sessions, Hermes processes and round-trip time of the server it is connected to:
 `CPU 23% · Load 1.20 · 3.8G free · waited 15s/60 · RTT 12 ms · 👥 2 · ⚙ 3`. On a remote gateway (SSH, URL + token) it
 measures the remote box, not your PC. Load is the 1-minute average (omitted when the server reports
 none); the tooltip adds hostname, cores, 5/15-min load, RAM used / total, free RAM, waited and RTT.
