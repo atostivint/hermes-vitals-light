@@ -6,7 +6,7 @@ kind: standalone
 version: 0.1.2
 requires_hermes: ">=0.22"
 description: >
-  Shows the CPU, memory, load and, on Linux, CPU pressure of the server the Hermes
+  One of four small Hermes Agent tools for simple, affordable setups, born from an experiment with decision models. Shows the CPU, memory, load and, on Linux, CPU pressure of the server the Hermes
   Desktop is connected to, plus the round-trip time to it, as a chip in the Desktop
   status bar.
 provides: []
